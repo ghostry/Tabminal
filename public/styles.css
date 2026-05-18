@@ -1706,7 +1706,9 @@ kbd {
 .file-tree-delete-btn,
 .file-tree-reset-btn,
 .file-tree-new-folder-btn,
-.file-tree-new-file-btn {
+.file-tree-new-file-btn,
+.file-tree-git-pull-btn,
+.file-tree-git-push-btn {
     display: none;
     border: 1px solid rgba(38, 139, 210, 0.28);
     border-radius: 999px;
@@ -1749,7 +1751,9 @@ kbd {
 .file-tree-delete-btn:disabled,
 .file-tree-reset-btn:disabled,
 .file-tree-new-folder-btn:disabled,
-.file-tree-new-file-btn:disabled {
+.file-tree-new-file-btn:disabled,
+.file-tree-git-pull-btn:disabled,
+.file-tree-git-push-btn:disabled {
     display: none;
 }
 
@@ -1757,7 +1761,9 @@ kbd {
 .file-tree-rename-btn[hidden],
 .file-tree-delete-btn[hidden],
 .file-tree-new-folder-btn[hidden],
-.file-tree-new-file-btn[hidden] {
+.file-tree-new-file-btn[hidden],
+.file-tree-git-pull-btn[hidden],
+.file-tree-git-push-btn[hidden] {
     display: none !important;
 }
 
@@ -1775,10 +1781,29 @@ kbd {
 }
 
 .file-tree-create-actions .file-tree-new-folder-btn,
-.file-tree-create-actions .file-tree-new-file-btn {
+.file-tree-create-actions .file-tree-new-file-btn,
+.file-tree-create-actions .file-tree-git-pull-btn,
+.file-tree-create-actions .file-tree-git-push-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+}
+
+.file-tree-git-pull-btn {
+    border-color: rgba(133, 153, 0, 0.28);
+    background: rgba(133, 153, 0, 0.12);
+    color: #859900;
+}
+
+.file-tree-git-push-btn {
+    border-color: rgba(38, 139, 210, 0.28);
+    background: rgba(38, 139, 210, 0.12);
+    color: #268bd2;
+}
+
+.file-tree-git-pull-btn.is-loading svg,
+.file-tree-git-push-btn.is-loading svg {
+    animation: tabminal-spin 0.6s linear 1;
 }
 
 .file-tree-rename-input {

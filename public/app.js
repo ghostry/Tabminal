@@ -202,6 +202,8 @@ const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="
 const DELETE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 12h10l1-12"></path><path d="M9 7V4h6v3"></path></svg>';
 const NEW_FOLDER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6a2.5 2.5 0 0 1 2.5 2.5V17A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17Z"></path><path d="M12 10.5v5"></path><path d="M9.5 13h5"></path></svg>';
 const NEW_FILE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4V20.5H7A2.5 2.5 0 0 1 4.5 18V6A2.5 2.5 0 0 1 7 3.5Z"></path><path d="M14 3.5V8h4"></path><path d="M12 11v6"></path><path d="M9 14h6"></path></svg>';
+const GIT_PULL_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="m7 15 5 5 5-5"></path><path d="M5 4h4M5 4v4"></path></svg>';
+const GIT_PUSH_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"></path><path d="m7 9 5-5 5 5"></path><path d="M5 20h4M5 20v-4"></path></svg>';
 const MARKDOWN_PREVIEW_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h18"></path><path d="M3 9.5h18"></path><path d="M5 5.5V18a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5.5"></path><path d="M9 13h6"></path><path d="M9 16h4"></path></svg>';
 const MARKDOWN_SPLIT_ENABLE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M12 5v14"></path></svg>';
 const MARKDOWN_SPLIT_DISABLE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M12 5v14"></path><path d="m9.25 8.5 5.5 7"></path></svg>';
@@ -4078,6 +4080,51 @@ class EditorManager {
         }
     }
 
+    async gitPullTree(session, dirPath, button) {
+        button.disabled = true;
+        button.classList.add('is-loading');
+        try {
+            const response = await session.server.fetch('/api/fs/git-pull', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: dirPath })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+            this.requestSessionTreeRefresh(session);
+            alert(data.output || 'Already up to date.', { title: 'Git Pull' });
+        } catch (err) {
+            alert(err.message || 'git pull failed', { type: 'error', title: 'Git Pull' });
+        } finally {
+            button.disabled = false;
+            button.classList.remove('is-loading');
+        }
+    }
+
+    async gitPushTree(session, dirPath, button) {
+        button.disabled = true;
+        button.classList.add('is-loading');
+        try {
+            const response = await session.server.fetch('/api/fs/git-push', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: dirPath })
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+            alert(data.output || 'Everything up-to-date.', { title: 'Git Push' });
+        } catch (err) {
+            alert(err.message || 'git push failed', { type: 'error', title: 'Git Push' });
+        } finally {
+            button.disabled = false;
+            button.classList.remove('is-loading');
+        }
+    }
+
     async commitTreeRename(session, file, nextName) {
         if (!session || !file || typeof nextName !== 'string') {
             return;
@@ -4209,6 +4256,20 @@ class EditorManager {
             newFileButton.innerHTML = NEW_FILE_ICON_SVG;
             actions.appendChild(newFileButton);
 
+            const gitPullButton = document.createElement('button');
+            gitPullButton.type = 'button';
+            gitPullButton.className = 'file-tree-git-pull-btn';
+            gitPullButton.title = 'Git Pull';
+            gitPullButton.innerHTML = GIT_PULL_ICON_SVG;
+            actions.appendChild(gitPullButton);
+
+            const gitPushButton = document.createElement('button');
+            gitPushButton.type = 'button';
+            gitPushButton.className = 'file-tree-git-push-btn';
+            gitPushButton.title = 'Git Push';
+            gitPushButton.innerHTML = GIT_PUSH_ICON_SVG;
+            actions.appendChild(gitPushButton);
+
             row.appendChild(actions);
         }
 
@@ -4239,6 +4300,34 @@ class EditorManager {
             newFileButton.onclick = (event) => {
                 event.stopPropagation();
                 void this.createTreeEntry(session, dirPath, 'file');
+            };
+        }
+
+        const isRootDir = dirPath === session.cwd;
+        const gitPullButton = row.querySelector('.file-tree-git-pull-btn');
+        const gitPushButton = row.querySelector('.file-tree-git-push-btn');
+
+        if (gitPullButton instanceof HTMLButtonElement) {
+            gitPullButton.hidden = !isRootDir;
+            gitPullButton.onmousedown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            };
+            gitPullButton.onclick = (event) => {
+                event.stopPropagation();
+                void this.gitPullTree(session, dirPath, gitPullButton);
+            };
+        }
+
+        if (gitPushButton instanceof HTMLButtonElement) {
+            gitPushButton.hidden = !isRootDir;
+            gitPushButton.onmousedown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            };
+            gitPushButton.onclick = (event) => {
+                event.stopPropagation();
+                void this.gitPushTree(session, dirPath, gitPushButton);
             };
         }
 
@@ -9052,9 +9141,13 @@ class Session {
         this.sharedWorkspaceState = normalizeWorkspaceSnapshot(
             {
                 ...sharedWorkspaceInput,
-                expandedPaths: hasExplicitExpandedPaths
+                expandedPaths: (hasExplicitExpandedPaths
                     ? sharedWorkspaceInput.expandedPaths
                     : Array.from(this.server.expandedPaths)
+                ).filter(p => {
+                    const cwd = data.cwd || this.initialCwd;
+                    return !cwd || p === cwd || p.startsWith(cwd + '/');
+                })
             }
         );
         const sharedActiveWorkspaceTabKey = typeof (

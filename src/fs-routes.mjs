@@ -485,6 +485,58 @@ export const setupFsRoutes = (router) => {
         }
     });
 
+    router.post('/api/fs/git-pull', async (ctx) => {
+        const targetPath = ctx.request.body?.path;
+        if (typeof targetPath !== 'string' || targetPath.length === 0) {
+            ctx.status = 400;
+            ctx.body = { error: 'Path required' };
+            return;
+        }
+        try {
+            const absPath = path.resolve(baseDir, targetPath);
+            const revParse = await execFileAsync(
+                'git', ['rev-parse', '--show-toplevel'],
+                { cwd: absPath, timeout: 5000 }
+            );
+            const repoRoot = revParse.stdout.trim();
+            const result = await execFileAsync('git', ['pull'], {
+                cwd: repoRoot,
+                timeout: 30000
+            });
+            ctx.body = { success: true, output: (result.stdout + result.stderr).trim() };
+        } catch (err) {
+            const msg = (err.stderr || err.stdout || err.message || '').trim();
+            ctx.status = 500;
+            ctx.body = { error: msg || 'git pull failed' };
+        }
+    });
+
+    router.post('/api/fs/git-push', async (ctx) => {
+        const targetPath = ctx.request.body?.path;
+        if (typeof targetPath !== 'string' || targetPath.length === 0) {
+            ctx.status = 400;
+            ctx.body = { error: 'Path required' };
+            return;
+        }
+        try {
+            const absPath = path.resolve(baseDir, targetPath);
+            const revParse = await execFileAsync(
+                'git', ['rev-parse', '--show-toplevel'],
+                { cwd: absPath, timeout: 5000 }
+            );
+            const repoRoot = revParse.stdout.trim();
+            const result = await execFileAsync('git', ['push'], {
+                cwd: repoRoot,
+                timeout: 30000
+            });
+            ctx.body = { success: true, output: (result.stdout + result.stderr).trim() };
+        } catch (err) {
+            const msg = (err.stderr || err.stdout || err.message || '').trim();
+            ctx.status = 500;
+            ctx.body = { error: msg || 'git push failed' };
+        }
+    });
+
     router.post('/api/fs/create', async (ctx) => {
         const parentPath = ctx.request.body?.parentPath;
         const kind = ctx.request.body?.kind;
