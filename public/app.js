@@ -135,7 +135,7 @@ const editorPane = document.getElementById('editor-pane');
 // #endregion
 
 // #region Configuration
-const HEARTBEAT_INTERVAL_MS = 1000;
+const HEARTBEAT_INTERVAL_MS = 10000;
 const RECONNECT_RETRY_MS = 5000;
 const FILE_TREE_REFRESH_INTERVAL_MS = 3000;
 const FILE_VERSION_CHECK_INTERVAL_MS = 3000;
