@@ -1,0 +1,55 @@
+.file-tree-name.git-status-modified { color: orange; }
+.file-tree-name.git-status-untracked { color: green; }
+.file-tree-name.git-status-staged { color: lightgreen; }
+.file-tree-name.git-status-deleted { color: red; }
+
+/* Folder gradient colors for mixed statuses */
+.file-tree-item.is-dir.git-status-mixed-modified-untracked .file-tree-name {
+  background: linear-gradient(90deg, orange, green);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-modified-staged .file-tree-name {
+  background: linear-gradient(90deg, orange, lightgreen);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-modified-deleted .file-tree-name {
+  background: linear-gradient(90deg, orange, red);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-untracked-staged .file-tree-name {
+  background: linear-gradient(90deg, green, lightgreen);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-untracked-deleted .file-tree-name {
+  background: linear-gradient(90deg, green, red);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-staged-deleted .file-tree-name {
+  background: linear-gradient(90deg, lightgreen, red);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.file-tree-item.is-dir.git-status-mixed-all .file-tree-name {
+  background: linear-gradient(90deg, orange, green, red);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Single-type folder colors */
+.file-tree-item.is-dir.git-status-modified .file-tree-name {
+  color: orange;
+}
+.file-tree-item.is-dir.git-status-untracked .file-tree-name {
+  color: green;
+}
+.file-tree-item.is-dir.git-status-staged .file-tree-name {
+  color: lightgreen;
+}
+.file-tree-item.is-dir.git-status-deleted .file-tree-name {
+  color: red;
+}
