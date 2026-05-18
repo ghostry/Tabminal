@@ -1557,6 +1557,40 @@ kbd {
     height: 2px;
 }
 
+/* Sidebar Resizer (vertical split) */
+.sidebar-resizer {
+    width: 6px;
+    background-color: transparent;
+    cursor: col-resize;
+    flex-shrink: 0;
+    z-index: 20;
+    position: relative;
+    transition: background-color 0.15s ease;
+}
+
+.sidebar-resizer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    background-color: var(--border-color);
+    transform: translateX(-50%);
+    transition: width 0.15s ease, background-color 0.15s ease;
+}
+
+.sidebar-resizer:hover::before,
+.sidebar-resizer.dragging::before {
+    background-color: var(--accent-color);
+    width: 3px;
+}
+
+.sidebar-resizer.dragging {
+    cursor: col-resize;
+    user-select: none;
+}
+
 .editor-layout {
     display: flex;
     flex-grow: 1;

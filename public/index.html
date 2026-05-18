@@ -210,6 +210,43 @@
                 attributes: true,
                 attributeFilter: ['class']
             });
+
+            // Sidebar resizer drag-to-resize
+            const resizer = document.getElementById('sidebar-resizer');
+            if (resizer) {
+                const savedWidth = localStorage.getItem('tabminal_sidebar_width');
+                if (savedWidth) {
+                    sidebar.style.width = savedWidth;
+                }
+
+                resizer.addEventListener('mousedown', function(e) {
+                    e.preventDefault();
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                    resizer.classList.add('dragging');
+
+                    const startX = e.clientX;
+                    const startWidth = parseInt(getComputedStyle(sidebar).width, 10);
+
+                    function onMouseMove(e) {
+                        const delta = e.clientX - startX;
+                        const newWidth = Math.min(Math.max(startWidth + delta, 100), 500);
+                        sidebar.style.width = newWidth + 'px';
+                    }
+
+                    function onMouseUp() {
+                        document.body.style.cursor = '';
+                        document.body.style.userSelect = '';
+                        resizer.classList.remove('dragging');
+                        window.removeEventListener('mousemove', onMouseMove);
+                        window.removeEventListener('mouseup', onMouseUp);
+                        localStorage.setItem('tabminal_sidebar_width', sidebar.style.width);
+                    }
+
+                    window.addEventListener('mousemove', onMouseMove);
+                    window.addEventListener('mouseup', onMouseUp);
+                });
+            }
         });
         window.addEventListener('load', updateLayout);
 
@@ -549,6 +586,7 @@
                 </li>
             </ul>
         </aside>
+        <div id="sidebar-resizer" class="sidebar-resizer" style="cursor: col-resize;"></div>
         <main id="terminal-container" class="terminal-container">
             <div id="editor-pane" class="editor-pane" style="display: none;">
                 <div class="editor-workspace">
