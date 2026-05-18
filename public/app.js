@@ -4040,7 +4040,7 @@ class EditorManager {
     }
 
     async resetTreeEntry(session, file) {
-        if (!session || !file?.gitModified || file.isDirectory) {
+        if (!session || !file?.gitStatus || file.isDirectory) {
             return;
         }
         const confirmed = await showConfirmModal({
@@ -4429,6 +4429,62 @@ class EditorManager {
         li.classList.toggle('expanded', isExpanded);
         icon.innerHTML = this.getIcon(file.name, file.isDirectory, isExpanded);
         name.textContent = file.name;
+            // Clear existing status classes
+            name.className = 'file-tree-name';
+            if (file.isDirectory) {
+                // Handle folder aggregate status
+                if (file.gitStatus === 'mixed-all') {
+                    row.classList.add('git-status-mixed-all');
+                } else if (file.gitStatus === 'mixed-modified-untracked') {
+                    row.classList.add('git-status-mixed-modified-untracked');
+                } else if (file.gitStatus === 'mixed-modified-staged') {
+                    row.classList.add('git-status-mixed-modified-staged');
+                } else if (file.gitStatus === 'mixed-modified-deleted') {
+                    row.classList.add('git-status-mixed-modified-deleted');
+                } else if (file.gitStatus === 'mixed-untracked-staged') {
+                    row.classList.add('git-status-mixed-untracked-staged');
+                } else if (file.gitStatus === 'mixed-untracked-deleted') {
+                    row.classList.add('git-status-mixed-untracked-deleted');
+                } else if (file.gitStatus === 'mixed-staged-deleted') {
+                    row.classList.add('git-status-mixed-staged-deleted');
+                } else if (file.gitStatus === 'mixed-modified-untracked-staged') {
+                    row.classList.add('git-status-mixed-modified-untracked-staged');
+                } else if (file.gitStatus === 'mixed-modified-untracked-deleted') {
+                    row.classList.add('git-status-mixed-modified-untracked-deleted');
+                } else if (file.gitStatus === 'mixed-modified-staged-deleted') {
+                    row.classList.add('git-status-mixed-modified-staged-deleted');
+                } else if (file.gitStatus === 'mixed-untracked-staged-deleted') {
+                    row.classList.add('git-status-mixed-untracked-staged-deleted');
+                } else if (file.gitStatus === 'M') {
+                    row.classList.add('git-status-modified');
+                } else if (file.gitStatus === '?') {
+                    row.classList.add('git-status-untracked');
+                } else if (file.gitStatus === 'A' || (file.gitStatus && file.gitStatus[0] !== ' ' && file.gitStatus[0] !== '?')) {
+                    row.classList.add('git-status-staged');
+                } else if (file.gitStatus === 'D' || (file.gitStatus && (file.gitStatus[1] === 'D' || file.gitStatus[0] === 'D'))) {
+                    row.classList.add('git-status-deleted');
+                }
+            } else {
+                // Handle file status (existing logic)
+                if (file.gitStatus) {
+                    // Working tree modified (orange)
+                    if (file.gitStatus[1] === 'M') {
+                        name.classList.add('git-status-modified');
+                    }
+                    // Untracked (green)
+                    else if (file.gitStatus[1] === '?') {
+                        name.classList.add('git-status-untracked');
+                    }
+                    // Staged (green/light green)
+                    else if (file.gitStatus[0] !== ' ' && file.gitStatus[0] !== '?') {
+                        name.classList.add('git-status-staged');
+                    }
+                    // Deleted (red)
+                    else if (file.gitStatus[1] === 'D' || file.gitStatus[0] === 'D') {
+                        name.classList.add('git-status-deleted');
+                    }
+                }
+            }
         name.style.display = isEditing ? 'none' : '';
         renameButton.style.display = isEditing ? 'none' : '';
         deleteButton.style.display = isEditing ? 'none' : '';
@@ -4458,7 +4514,7 @@ class EditorManager {
             void this.deleteTreeEntry(session, file);
         };
 
-        const isResettable = file.gitModified && !file.isDirectory;
+        const isResettable = file.gitStatus && file.gitStatus[1] === 'M' && !file.isDirectory;
         resetButton.style.display = isEditing ? 'none' : '';
         resetButton.hidden = !isResettable;
         resetButton.disabled = !isResettable;

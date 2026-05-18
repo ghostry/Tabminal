@@ -1,22 +1,35 @@
-FROM node:latest
+FROM docker.1ms.run/library/node:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN sed -i 's|URIs: http://deb\.debian\.org/debian|URIs: http://mirrors.aliyun.com/debian|' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|URIs: http://deb\.debian\.org/debian-security|URIs: http://mirrors.aliyun.com/debian-security|' /etc/apt/sources.list.d/debian.sources && \
+    apt update -y;\
+    apt install sudo vim screen htop iotop iftop docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential -y;\
+    apt clean
+
+RUN npm config set registry https://registry.npmmirror.com && \
+    @anthropic-ai/claude-code \
+    @musistudio/claude-code-router
 
 WORKDIR /app
 
-ARG TABMINAL_NPM_SPEC=tabminal
+RUN useradd -u 1000 -m -d /home/coder -s /bin/bash coder && \
+    groupadd -f -g 997 docker && \
+    usermod -aG docker coder && \
+    echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder
 
-# Install cloudflared
-RUN curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && \
-    dpkg -i cloudflared.deb && \
-    rm cloudflared.deb
+COPY . .
 
-# Install Tabminal from npm
-RUN npm install -g "${TABMINAL_NPM_SPEC}" --unsafe-perm --allow-root
+RUN npm install
+
+ENV PORT=9846
+ENV HOST=0.0.0.0
+ENV PASSWORD=admin
 
 # Expose the default port
 EXPOSE 9846
 
-# Set the entrypoint to the Tabminal CLI
-ENTRYPOINT ["tabminal"]
+USER coder
 
 # Default command (can be overridden)
-CMD ["--help"]
+CMD ["/app/start.sh"]

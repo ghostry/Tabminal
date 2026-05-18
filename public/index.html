@@ -913,6 +913,10 @@
                 }
             };
             document.head.appendChild(link);
+            const gitStatusLink = document.createElement('link');
+            gitStatusLink.rel = 'stylesheet';
+            gitStatusLink.href = `./css/git-status.css?v=${encodeURIComponent(runtimeBootId)}`;
+            document.head.appendChild(gitStatusLink);
             const script = document.createElement('script');
             script.type = 'module';
             script.src = `./app.js?v=${encodeURIComponent(runtimeBootId)}`;

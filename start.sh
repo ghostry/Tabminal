@@ -1,2 +1,4 @@
 #!/bin/bash
-npm start -- --accept-terms -a qweasd -p 7083 -h 0.0.0.0
+cd $(dirname $(readlink -f "$0"))
+npm start -- --accept-terms -a $PASSWORD -p $PORT -h $HOST
+sudo chmod 666 /run/docker.sock
