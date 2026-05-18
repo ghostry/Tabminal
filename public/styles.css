@@ -2946,6 +2946,13 @@ kbd {
     opacity: 0.72;
 }
 
+/* Ensure native <select> dropdown options use dark theme */
+.agent-panel-mode-select option,
+.agent-panel-mode-select optgroup {
+    background-color: #073642;
+    color: #93a1a1;
+}
+
 .agent-panel-button:disabled:hover,
 .agent-panel-button:disabled:focus-visible,
 .agent-panel-mode-select:disabled:hover,
