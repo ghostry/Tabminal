@@ -1704,6 +1704,7 @@ kbd {
 
 .file-tree-rename-btn,
 .file-tree-delete-btn,
+.file-tree-reset-btn,
 .file-tree-new-folder-btn,
 .file-tree-new-file-btn {
     display: none;
@@ -1723,7 +1724,10 @@ kbd {
 .file-tree-item:focus-within .file-tree-rename-btn,
 .file-tree-item:hover .file-tree-delete-btn,
 .file-tree-item.selected .file-tree-delete-btn,
-.file-tree-item:focus-within .file-tree-delete-btn {
+.file-tree-item:focus-within .file-tree-delete-btn,
+.file-tree-item:hover .file-tree-reset-btn,
+.file-tree-item.selected .file-tree-reset-btn,
+.file-tree-item:focus-within .file-tree-reset-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1735,11 +1739,26 @@ kbd {
     color: #dc322f;
 }
 
+.file-tree-reset-btn {
+    border-color: rgba(181, 137, 0, 0.28);
+    background: rgba(181, 137, 0, 0.12);
+    color: #b58900;
+}
+
 .file-tree-rename-btn:disabled,
 .file-tree-delete-btn:disabled,
+.file-tree-reset-btn:disabled,
 .file-tree-new-folder-btn:disabled,
 .file-tree-new-file-btn:disabled {
     display: none;
+}
+
+.file-tree-reset-btn[hidden],
+.file-tree-rename-btn[hidden],
+.file-tree-delete-btn[hidden],
+.file-tree-new-folder-btn[hidden],
+.file-tree-new-file-btn[hidden] {
+    display: none !important;
 }
 
 .file-tree-create-entry {

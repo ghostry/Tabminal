@@ -198,6 +198,7 @@ const TERMINAL_TAB_MODE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="
 const TERMINAL_AUTO_MODE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="5" rx="1.5"></rect><rect x="4" y="14" width="16" height="5" rx="1.5"></rect></svg>';
 const PLUS_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>';
 const RENAME_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="m12 20 7-7"></path><path d="M16 6.5a1.8 1.8 0 1 1 2.5 2.5L8 19.5 4 20l.5-4L16 6.5Z"></path></svg>';
+const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>';
 const DELETE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 12h10l1-12"></path><path d="M9 7V4h6v3"></path></svg>';
 const NEW_FOLDER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6a2.5 2.5 0 0 1 2.5 2.5V17A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17Z"></path><path d="M12 10.5v5"></path><path d="M9.5 13h5"></path></svg>';
 const NEW_FILE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4V20.5H7A2.5 2.5 0 0 1 4.5 18V6A2.5 2.5 0 0 1 7 3.5Z"></path><path d="M14 3.5V8h4"></path><path d="M12 11v6"></path><path d="M9 14h6"></path></svg>';
@@ -4036,6 +4037,47 @@ class EditorManager {
         }
     }
 
+    async resetTreeEntry(session, file) {
+        if (!session || !file?.gitModified || file.isDirectory) {
+            return;
+        }
+        const confirmed = await showConfirmModal({
+            title: 'Reset Local Changes',
+            message: `Discard local changes to "${file.name}"?`,
+            note: 'ℹ️ This action cannot be undone.',
+            confirmLabel: 'Reset',
+            danger: true,
+            returnFocus: session.fileTreeElement
+        });
+        if (!confirmed) {
+            session.fileTreeElement?.focus({ preventScroll: true });
+            return;
+        }
+
+        try {
+            const response = await session.server.fetch(
+                '/api/fs/git-reset',
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        path: file.path
+                    })
+                }
+            );
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            this.requestSessionTreeRefresh(session);
+            session.fileTreeElement?.focus({ preventScroll: true });
+        } catch (resetError) {
+            alert(resetError.message || 'Failed to reset file', {
+                type: 'error',
+                title: 'Files'
+            });
+        }
+    }
+
     async commitTreeRename(session, file, nextName) {
         if (!session || !file || typeof nextName !== 'string') {
             return;
@@ -4248,6 +4290,17 @@ class EditorManager {
             row.appendChild(deleteButton);
         }
 
+        let resetButton = row.querySelector('.file-tree-reset-btn');
+        if (!resetButton) {
+            resetButton = document.createElement('button');
+            resetButton.type = 'button';
+            resetButton.className = 'file-tree-reset-btn';
+            resetButton.title = 'Reset';
+            resetButton.setAttribute('aria-label', `Reset ${file.name}`);
+            resetButton.innerHTML = RESET_ICON_SVG;
+            row.appendChild(resetButton);
+        }
+
         let name = row.querySelector('.file-tree-name');
         if (!name) {
             name = document.createElement('span');
@@ -4316,6 +4369,21 @@ class EditorManager {
             void this.deleteTreeEntry(session, file);
         };
 
+        const isResettable = file.gitModified && !file.isDirectory;
+        resetButton.style.display = isEditing ? 'none' : '';
+        resetButton.hidden = !isResettable;
+        resetButton.disabled = !isResettable;
+        resetButton.title = `Discard local changes to ${file.name}`;
+        resetButton.setAttribute('aria-label', `Reset ${file.name}`);
+        resetButton.onmousedown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        resetButton.onclick = (event) => {
+            event.stopPropagation();
+            void this.resetTreeEntry(session, file);
+        };
+
         if (renameInput) {
             if (document.activeElement !== renameInput) {
                 renameInput.value = file.name;
@@ -4371,6 +4439,9 @@ class EditorManager {
                 return;
             }
             if (e.target.closest('.file-tree-delete-btn')) {
+                return;
+            }
+            if (e.target.closest('.file-tree-reset-btn')) {
                 return;
             }
             if (e.target.closest('.file-tree-rename-input')) {
@@ -4439,6 +4510,7 @@ class EditorManager {
             if (
                 event.target.closest('.file-tree-rename-btn')
                 || event.target.closest('.file-tree-delete-btn')
+                || event.target.closest('.file-tree-reset-btn')
                 || event.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -9315,7 +9387,15 @@ class Session {
         if (data.cwd && data.cwd !== this.cwd) {
             this.cwd = data.cwd;
             changed = true;
-            
+
+            if (this.sharedWorkspaceState) {
+                const newCwd = data.cwd;
+                this.sharedWorkspaceState.expandedPaths =
+                    this.sharedWorkspaceState.expandedPaths.filter(
+                        p => p === newCwd || p.startsWith(newCwd + '/')
+                    );
+            }
+
             if (this.editorState) {
                 this.editorState.root = this.cwd;
                 if (this.editorState.isVisible) {

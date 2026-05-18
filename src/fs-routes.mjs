@@ -3,6 +3,9 @@ import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
+import util from 'node:util';
+import { execFile } from 'node:child_process';
+const execFileAsync = util.promisify(execFile);
 
 const IMAGE_MIME_TYPES = {
     '.png': 'image/png',
@@ -260,6 +263,56 @@ const resolvePath = (baseDir, targetPath) => {
     return path.resolve(baseDir, targetPath);
 };
 
+// Check if path is in a git repository and get git status
+async function getGitStatus(baseDir, filePath) {
+    try {
+        // Resolve the absolute path of the file
+        const absFilePath = path.resolve(baseDir, filePath);
+        const fileDir = path.dirname(absFilePath);
+
+        // Find the git repo root by running git rev-parse from the file's directory
+        let repoRoot;
+        try {
+            const revParse = await execFileAsync(
+                'git', ['rev-parse', '--show-toplevel'],
+                { cwd: fileDir, timeout: 5000 }
+            );
+            repoRoot = revParse.stdout.trim();
+        } catch (e) {
+            return null;
+        }
+
+        // Execute git status --porcelain in the actual repo root
+        const result = await execFileAsync('git', ['status', '--porcelain'], {
+            cwd: repoRoot,
+            timeout: 5000
+        });
+
+        if (!result.stdout.trim()) {
+            return { hasChanges: false };
+        }
+
+        // Compute path relative to the git repo root for comparison
+        const normalizedPath = path.normalize(path.relative(repoRoot, absFilePath));
+
+        const lines = result.stdout.split('\n');
+        const hasTargetFile = lines.some(line => {
+            if (line.length < 4) return false;
+            // Git porcelain format: "XY filename" — exactly 2 status chars + space, never trimmed
+            let fileName = line.slice(3).replace(/\/$/, '');
+            const arrowIndex = fileName.indexOf(' -> ');
+            if (arrowIndex !== -1) fileName = fileName.slice(arrowIndex + 4);
+            const normalizedFile = path.normalize(fileName);
+            return normalizedPath === normalizedFile
+                || normalizedPath.startsWith(normalizedFile + path.sep);
+        });
+
+        return { hasChanges: hasTargetFile };
+    } catch (error) {
+        return null;
+    }
+}
+
 export const setupFsRoutes = (router) => {
     const baseDir = process.cwd(); // Or config.homeDir if you want to restrict/change it
 
@@ -291,12 +344,14 @@ export const setupFsRoutes = (router) => {
                     .filter(dirent => dirent.name !== '.DS_Store')
                     .map(async (dirent) => {
                         const entryPath = path.join(dirPath, dirent.name);
+                        const gitStatus = await getGitStatus(baseDir, entryPath);
                         return {
                             name: dirent.name,
                             isDirectory: dirent.isDirectory(),
                             path: entryPath,
                             renameable,
-                            deleteable: renameable
+                            deleteable: renameable,
+                            gitModified: gitStatus?.hasChanges || false
                         };
                     })
             );
@@ -390,6 +445,41 @@ export const setupFsRoutes = (router) => {
             };
         } catch (err) {
             console.error('FS Delete Error:', err);
+            ctx.status = 500;
+            ctx.body = { error: err.message };
+        }
+    });
+
+    router.post('/api/fs/git-reset', async (ctx) => {
+        const targetPath = ctx.request.body?.path;
+        if (typeof targetPath !== 'string' || targetPath.length === 0) {
+            ctx.status = 400;
+            ctx.body = { error: 'Path required' };
+            return;
+        }
+
+        try {
+            // Check if this is a git repository
+            const gitDir = path.join(baseDir, '.git');
+            const gitStatus = await fs.stat(gitDir);
+            if (!gitStatus.isDirectory()) {
+                ctx.status = 400;
+                ctx.body = { error: 'Not a git repository' };
+                return;
+            }
+
+            // Execute git checkout -- for the specific file
+            await execFileAsync('git', ['checkout', '--', targetPath], {
+                cwd: baseDir,
+                timeout: 5000
+            });
+
+            ctx.body = {
+                path: targetPath,
+                success: true
+            };
+        } catch (err) {
+            console.error('FS Git Reset Error:', err);
             ctx.status = 500;
             ctx.body = { error: err.message };
         }
