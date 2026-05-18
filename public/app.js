@@ -2438,6 +2438,7 @@ class EditorManager {
             blocked: overrides.blocked ?? false,
             force: overrides.force ?? false
         });
+        this.renderEditorTabs();
     }
 
     getPendingFileWrite(session, filePath) {
@@ -2861,7 +2862,11 @@ class EditorManager {
 
     clearPendingFileWrite(sessionKey, filePath) {
         const pending = pendingChanges.sessions.get(sessionKey);
+        const hadWrite = pending?.fileWrites?.has(filePath);
         pending?.fileWrites?.delete(filePath);
+        if (hadWrite) {
+            this.renderEditorTabs();
+        }
     }
 
     remapTreePath(pathValue, oldPath, newPath, isDirectory) {
@@ -5595,6 +5600,14 @@ class EditorManager {
             const icon = document.createElement('span');
             icon.className = 'file-editor-tab-icon';
             icon.innerHTML = this.getIcon(name, false, false);
+
+            const pendingWrite = this.getPendingFileWrite(this.currentSession, path);
+            if (pendingWrite && pendingWrite.content !== undefined) {
+                const unsavedStar = document.createElement('span');
+                unsavedStar.className = 'unsaved-star';
+                unsavedStar.textContent = '* ';
+                tab.appendChild(unsavedStar);
+            }
 
             const span = document.createElement('span');
             span.textContent = name;

@@ -1960,6 +1960,15 @@ kbd {
     font-style: normal;
 }
 
+.editor-tab .unsaved-star {
+    color: #b58900;
+    font-weight: bold;
+    font-size: 0.9rem;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-right: -4px;
+}
+
 .editor-content {
     flex-grow: 1;
     position: relative;
