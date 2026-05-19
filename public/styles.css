@@ -217,9 +217,16 @@ body {
     width: var(--app-width);
     height: var(--app-height);
     overflow: hidden;
+    overscroll-behavior: none;
+}
+
+.app-shell {
     display: flex;
     flex-direction: column;
-    overscroll-behavior: none;
+    width: var(--shell-width, 100%);
+    height: var(--shell-height, 100%);
+    transform-origin: top left;
+    transform: scale(var(--shell-scale, 1));
 }
 
 /* Prevent scroll chaining on scrollable elements */

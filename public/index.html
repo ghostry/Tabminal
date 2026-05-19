@@ -61,6 +61,7 @@
         }
 
         // Mobile Layout Manager
+        const MIN_APP_WIDTH = 500;
         function updateLayout() {
             const layoutViewport = frozenLayoutViewport || readLayoutViewport();
             const {
@@ -74,6 +75,13 @@
             document.documentElement.style.setProperty('--app-height', `${height}px`);
             document.documentElement.style.setProperty('--app-top', `${offsetTop}px`);
             document.documentElement.style.setProperty('--app-left', `${offsetLeft}px`);
+
+            const shellScale = width < MIN_APP_WIDTH ? width / MIN_APP_WIDTH : 1;
+            const shellWidth = width < MIN_APP_WIDTH ? MIN_APP_WIDTH : width;
+            const shellHeight = shellScale < 1 ? height / shellScale : height;
+            document.documentElement.style.setProperty('--shell-scale', `${shellScale}`);
+            document.documentElement.style.setProperty('--shell-width', `${shellWidth}px`);
+            document.documentElement.style.setProperty('--shell-height', `${shellHeight}px`);
 
             const previousCompactWorkspaceMode =
                 window.__tabminalCompactWorkspaceMode;
@@ -561,6 +569,7 @@
 </head>
 
 <body>
+    <div id="app-shell" class="app-shell">
     <div id="system-status-bar" class="system-status-bar">
         <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Menu">
             <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"
@@ -662,6 +671,7 @@
         <button data-key="RIGHT">▶</button>
     </div>
     <div id="soft-keyboard" class="soft-keyboard" style="display: none;"></div>
+    </div>
     <div id="login-modal" class="modal" style="display: none;">
         <div class="modal-content">
             <h2>Authentication Required</h2>

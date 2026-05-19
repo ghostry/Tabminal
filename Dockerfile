@@ -1,19 +1,21 @@
-FROM docker.1ms.run/library/node:latest
+FROM docker.m.daocloud.io/library/node:latest
+# FROM docker.1ms.run/library/node:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN sed -i 's|URIs: http://deb\.debian\.org/debian|URIs: http://mirrors.aliyun.com/debian|' /etc/apt/sources.list.d/debian.sources && \
     sed -i 's|URIs: http://deb\.debian\.org/debian-security|URIs: http://mirrors.aliyun.com/debian-security|' /etc/apt/sources.list.d/debian.sources && \
     apt update -y;\
-    apt install sudo vim screen htop iotop iftop docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential -y;\
+    apt install sudo vim screen htop iotop iftop docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential rsync -y;\
     apt clean
 
 RUN npm config set registry https://registry.npmmirror.com && \
-    @anthropic-ai/claude-code \
+   npm i -g  @anthropic-ai/claude-code \
     @musistudio/claude-code-router
 
 WORKDIR /app
 
-RUN useradd -u 1000 -m -d /home/coder -s /bin/bash coder && \
+RUN userdel -f -r node 2>/dev/null || true; \
+    useradd -u 1000 -m -d /home/coder -s /bin/bash coder && \
     groupadd -f -g 997 docker && \
     usermod -aG docker coder && \
     echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder
