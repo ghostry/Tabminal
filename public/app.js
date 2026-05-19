@@ -422,7 +422,7 @@ function isForcedTerminalWorkspaceMode() {
 
 function getTerminalFontSize() {
     if (!IS_MOBILE) return 12;
-    return 10;
+    return 12;
 }
 
 function buildMainTerminalTheme() {
