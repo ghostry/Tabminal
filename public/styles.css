@@ -270,7 +270,7 @@ body {
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    padding: 0;
+    padding: 10px;
     margin-right: 10px;
     flex-shrink: 0;
 }
