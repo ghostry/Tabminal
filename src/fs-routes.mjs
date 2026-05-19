@@ -541,9 +541,12 @@ export const setupFsRoutes = (router) => {
 
         try {
             // Check if this is a git repository
-            const gitDir = path.join(baseDir, '.git');
-            const gitStatus = await fs.stat(gitDir);
-            if (!gitStatus.isDirectory()) {
+            try {
+                await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], {
+                    cwd: baseDir,
+                    timeout: 2000
+                });
+            } catch (err) {
                 ctx.status = 400;
                 ctx.body = { error: 'Not a git repository' };
                 return;
