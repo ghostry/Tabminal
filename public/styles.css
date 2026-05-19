@@ -1712,6 +1712,7 @@ kbd {
 .file-tree-rename-btn,
 .file-tree-delete-btn,
 .file-tree-reset-btn,
+.file-tree-diff-btn,
 .file-tree-new-folder-btn,
 .file-tree-new-file-btn,
 .file-tree-git-pull-btn,
@@ -1734,9 +1735,14 @@ kbd {
 .file-tree-item:hover .file-tree-delete-btn,
 .file-tree-item.selected .file-tree-delete-btn,
 .file-tree-item:focus-within .file-tree-delete-btn,
+.file-tree-item .file-tree-reset-btn,
 .file-tree-item:hover .file-tree-reset-btn,
 .file-tree-item.selected .file-tree-reset-btn,
-.file-tree-item:focus-within .file-tree-reset-btn {
+.file-tree-item:focus-within .file-tree-reset-btn,
+.file-tree-item .file-tree-diff-btn,
+.file-tree-item:hover .file-tree-diff-btn,
+.file-tree-item.selected .file-tree-diff-btn,
+.file-tree-item:focus-within .file-tree-diff-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1754,9 +1760,16 @@ kbd {
     color: #b58900;
 }
 
+.file-tree-diff-btn {
+    border-color: rgba(38, 139, 210, 0.28);
+    background: rgba(38, 139, 210, 0.12);
+    color: #268bd2;
+}
+
 .file-tree-rename-btn:disabled,
 .file-tree-delete-btn:disabled,
 .file-tree-reset-btn:disabled,
+.file-tree-diff-btn:disabled,
 .file-tree-new-folder-btn:disabled,
 .file-tree-new-file-btn:disabled,
 .file-tree-git-pull-btn:disabled,
@@ -1767,6 +1780,7 @@ kbd {
 .file-tree-reset-btn[hidden],
 .file-tree-rename-btn[hidden],
 .file-tree-delete-btn[hidden],
+.file-tree-diff-btn[hidden],
 .file-tree-new-folder-btn[hidden],
 .file-tree-new-file-btn[hidden],
 .file-tree-git-pull-btn[hidden],
@@ -3855,6 +3869,15 @@ kbd {
     width: 100%;
     height: 100%;
     min-width: 0;
+}
+
+.diff-editor-container {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    z-index: 5;
 }
 
 .editor-content.markdown-split-active > .monaco-container {

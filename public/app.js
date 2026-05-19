@@ -199,6 +199,7 @@ const TERMINAL_AUTO_MODE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height=
 const PLUS_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>';
 const RENAME_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="m12 20 7-7"></path><path d="M16 6.5a1.8 1.8 0 1 1 2.5 2.5L8 19.5 4 20l.5-4L16 6.5Z"></path></svg>';
 const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>';
+const DIFF_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v12"></path><path d="M9 18v2"></path><path d="M6 7l3-3 3 3"></path><path d="M15 20V8"></path><path d="M15 6V4"></path><path d="M18 17l-3 3-3-3"></path></svg>';
 const DELETE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 12h10l1-12"></path><path d="M9 7V4h6v3"></path></svg>';
 const NEW_FOLDER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6a2.5 2.5 0 0 1 2.5 2.5V17A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17Z"></path><path d="M12 10.5v5"></path><path d="M9.5 13h5"></path></svg>';
 const NEW_FILE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4V20.5H7A2.5 2.5 0 0 1 4.5 18V6A2.5 2.5 0 0 1 7 3.5Z"></path><path d="M14 3.5V8h4"></path><path d="M12 11v6"></path><path d="M9 14h6"></path></svg>';
@@ -1406,6 +1407,10 @@ class EditorManager {
         };
         this.contentContainer = document.getElementById('editor-content');
         this.monacoContainer = document.getElementById('monaco-container');
+        this.diffEditorContainer = document.getElementById('diff-editor-container');
+        this.diffEditor = null;
+        this.diffEditorFilePath = '';
+        this.diffFiles = new Map();
         this.imagePreviewContainer = document.getElementById('image-preview-container');
         this.imagePreview = document.getElementById('image-preview');
         this.pdfPreviewContainer = document.getElementById(
@@ -4254,6 +4259,226 @@ class EditorManager {
         }
     }
 
+    async showDiffForFile(session, file) {
+        if (!session || !file || file.isDirectory) return;
+        const filePath = file.path;
+        if (!filePath) return;
+        if (this.currentSession?.key !== session.key) {
+            await switchToSession(session.key);
+        }
+        const targetSession = this.currentSession?.key === session.key
+            ? this.currentSession
+            : session;
+        if (!targetSession) return;
+
+        if (
+            targetSession.editorState
+            && !targetSession.editorState.isVisible
+        ) {
+            this.toggle(targetSession);
+        }
+
+        let originalContent = '';
+        try {
+            const response = await targetSession.server.fetch(
+                `/api/fs/git-show?path=${encodeURIComponent(filePath)}`
+            );
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            originalContent = data.content || '';
+        } catch (err) {
+            alert(err.message || 'git show failed', {
+                type: 'error',
+                title: 'Diff'
+            });
+            return;
+        }
+
+        let modifiedContent = '';
+        try {
+            const response = await targetSession.server.fetch(
+                `/api/fs/read?path=${encodeURIComponent(filePath)}`
+            );
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.error || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            modifiedContent = data.content || '';
+        } catch (err) {
+            alert(err.message || 'Failed to read file', {
+                type: 'error',
+                title: 'Diff'
+            });
+            return;
+        }
+
+        await this.openFile(filePath, targetSession, {
+            focusEditor: false
+        });
+
+        this.diffFiles.set(filePath, { originalContent, modifiedContent });
+        this.diffEditorFilePath = '';
+        this.activateFileTab(filePath, false, { focusEditor: false });
+        window.__tabminalCloseSidebarIfFloating?.();
+    }
+
+    showDiffForActiveFile(filePath) {
+        const entry = this.diffFiles.get(filePath);
+        if (!entry || !this.monacoInstance || !this.diffEditorContainer) return;
+
+        if (this.agentContainer) this.agentContainer.style.display = 'none';
+        if (this.monacoContainer) this.monacoContainer.style.display = 'none';
+        if (this.imagePreviewContainer) {
+            this.imagePreviewContainer.style.display = 'none';
+        }
+        this.hidePdfPreview?.();
+        this.hideMarkdownPreview?.();
+        if (this.emptyState) this.emptyState.style.display = 'none';
+        this.diffEditorContainer.style.display = 'block';
+
+        if (!this.diffEditor) {
+            this.diffEditor = this.monacoInstance.editor.createDiffEditor(
+                this.diffEditorContainer,
+                {
+                    readOnly: true,
+                    theme: 'solarized-dark',
+                    automaticLayout: true,
+                    scrollBeyondLastLine: false,
+                    minimap: { enabled: false },
+                    lineNumbers: 'on',
+                    glyphMargin: false,
+                    renderSideBySide: true,
+                    originalEditable: false,
+                    diffWordWrap: 'off',
+                    hideUnchangedRegions: {
+                        enabled: true,
+                        contextLineCount: 10,
+                        minimumLineCount: 3,
+                        revealLineCount: 20
+                    },
+                    fontSize: IS_MOBILE ? 14 : 12,
+                    fontFamily: "'Monaspace Neon', \"SF Mono Terminal\", "
+                        + '"SFMono-Regular", "SF Mono", '
+                        + '"JetBrains Mono", Menlo, Consolas, monospace'
+                }
+            );
+            this.attachDiffEditorJumpHandlers();
+        }
+
+        if (this.diffEditorFilePath === filePath) {
+            requestAnimationFrame(() => {
+                if (this.diffEditor) this.diffEditor.layout();
+            });
+            return;
+        }
+
+        const monaco = this.monacoInstance;
+        const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const originalModel = monaco.editor.createModel(
+            entry.originalContent,
+            undefined,
+            monaco.Uri.from({
+                scheme: 'tabminal-diff',
+                path: filePath,
+                query: `original-${stamp}`
+            })
+        );
+        const modifiedModel = monaco.editor.createModel(
+            entry.modifiedContent,
+            undefined,
+            monaco.Uri.from({
+                scheme: 'tabminal-diff',
+                path: filePath,
+                query: `modified-${stamp}`
+            })
+        );
+
+        const previousModel = this.diffEditor.getModel();
+        this.diffEditor.setModel({
+            original: originalModel,
+            modified: modifiedModel
+        });
+        if (previousModel) {
+            previousModel.original?.dispose();
+            previousModel.modified?.dispose();
+        }
+        this.diffEditorFilePath = filePath;
+        requestAnimationFrame(() => {
+            if (this.diffEditor) this.diffEditor.layout();
+        });
+    }
+
+    detachDiffEditor() {
+        if (!this.diffEditorContainer) return;
+        this.diffEditorContainer.style.display = 'none';
+        this.diffEditorFilePath = '';
+    }
+
+    attachDiffEditorJumpHandlers() {
+        if (!this.diffEditor) return;
+        const modifiedEditor = this.diffEditor.getModifiedEditor?.();
+        if (!modifiedEditor) return;
+
+        const jumpToLine = async (lineNumber) => {
+            const filePath = this.diffEditorFilePath;
+            if (!filePath || !lineNumber || !this.currentSession) return;
+            this.diffFiles.delete(filePath);
+            this.detachDiffEditor();
+            await this.openFile(filePath, this.currentSession, {
+                focusEditor: true
+            });
+            this.activateFileTab(filePath, false, { focusEditor: true });
+            if (this.editor) {
+                this.editor.revealLineInCenter(lineNumber);
+                this.editor.setPosition({ lineNumber, column: 1 });
+                this.editor.focus();
+            }
+        };
+
+        let lastClickTime = 0;
+        let lastClickLine = 0;
+        modifiedEditor.onMouseDown((e) => {
+            const line = e?.target?.position?.lineNumber || 0;
+            if (!line) {
+                lastClickTime = 0;
+                lastClickLine = 0;
+                return;
+            }
+            const now = Date.now();
+            if (
+                lastClickLine === line
+                && now - lastClickTime < 500
+            ) {
+                lastClickTime = 0;
+                lastClickLine = 0;
+                void jumpToLine(line);
+                return;
+            }
+            lastClickTime = now;
+            lastClickLine = line;
+        });
+    }
+
+    openDiffView() {}
+
+    closeDiffView() {
+        if (!this.diffEditorContainer) return;
+        this.diffEditorContainer.style.display = 'none';
+        if (this.diffEditor) {
+            const previousModel = this.diffEditor.getModel();
+            this.diffEditor.setModel(null);
+            if (previousModel) {
+                previousModel.original?.dispose();
+                previousModel.modified?.dispose();
+            }
+        }
+        this.diffEditorFilePath = '';
+    }
+
     async gitPullTree(session, dirPath, button) {
         button.disabled = true;
         button.classList.add('is-loading');
@@ -4553,6 +4778,17 @@ class EditorManager {
             row.appendChild(resetButton);
         }
 
+        let diffButton = row.querySelector('.file-tree-diff-btn');
+        if (!diffButton) {
+            diffButton = document.createElement('button');
+            diffButton.type = 'button';
+            diffButton.className = 'file-tree-diff-btn';
+            diffButton.title = 'Diff';
+            diffButton.setAttribute('aria-label', `Diff ${file.name}`);
+            diffButton.innerHTML = DIFF_ICON_SVG;
+            row.appendChild(diffButton);
+        }
+
         let name = row.querySelector('.file-tree-name');
         if (!name) {
             name = document.createElement('span');
@@ -4665,6 +4901,26 @@ class EditorManager {
             void this.resetTreeEntry(session, file);
         };
 
+        const isDiffable = !file.isDirectory
+            && typeof file.gitStatus === 'string'
+            && file.gitStatus.length > 0
+            && file.gitStatus !== '??'
+            && file.gitStatus[0] !== '?'
+            && file.gitStatus[1] !== '?';
+        diffButton.style.display = isEditing ? 'none' : '';
+        diffButton.hidden = !isDiffable;
+        diffButton.disabled = !isDiffable;
+        diffButton.title = `Show diff for ${file.name}`;
+        diffButton.setAttribute('aria-label', `Diff ${file.name}`);
+        diffButton.onmousedown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        diffButton.onclick = (event) => {
+            event.stopPropagation();
+            void this.showDiffForFile(session, file);
+        };
+
         if (renameInput) {
             if (document.activeElement !== renameInput) {
                 renameInput.value = file.name;
@@ -4717,6 +4973,9 @@ class EditorManager {
         row.onclick = async (e) => {
             e.stopPropagation();
             if (e.target.closest('.file-tree-reset-btn')) {
+                return;
+            }
+            if (e.target.closest('.file-tree-diff-btn')) {
                 return;
             }
             if (e.target.closest('.file-tree-rename-input')) {
@@ -4778,6 +5037,7 @@ class EditorManager {
             e.stopPropagation();
             if (
                 e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-diff-btn')
                 || e.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -4797,6 +5057,7 @@ class EditorManager {
         row.oncontextmenu = (e) => {
             if (
                 e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-diff-btn')
                 || e.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -4822,6 +5083,7 @@ class EditorManager {
         row.ontouchstart = (e) => {
             if (
                 e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-diff-btn')
                 || e.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -4868,6 +5130,7 @@ class EditorManager {
         row.onmousedown = (event) => {
             if (
                 event.target.closest('.file-tree-reset-btn')
+                || event.target.closest('.file-tree-diff-btn')
                 || event.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -5928,6 +6191,21 @@ class EditorManager {
             this.currentSession.workspaceState.markdownSplitPath = '';
         }
 
+        if (this.diffFiles.has(filePath)) {
+            this.diffFiles.delete(filePath);
+            if (this.diffEditorFilePath === filePath) {
+                this.detachDiffEditor();
+                if (this.diffEditor) {
+                    const previousModel = this.diffEditor.getModel();
+                    this.diffEditor.setModel(null);
+                    if (previousModel) {
+                        previousModel.original?.dispose();
+                        previousModel.modified?.dispose();
+                    }
+                }
+            }
+        }
+
         const index = state.openFiles.indexOf(filePath);
         let touchedWorkspace = false;
         if (index > -1) {
@@ -6497,10 +6775,18 @@ class EditorManager {
             this.currentSession.saveState({ touchWorkspace: true });
         }
         const file = this.getModel(filePath);
-        
+
         this.renderEditorTabs();
         this.emptyState.style.display = 'none';
         this.syncTerminalWorkspacePlacement();
+
+        if (this.diffFiles && this.diffFiles.has(filePath)) {
+            this.showDiffForActiveFile(filePath);
+            return;
+        }
+        if (this.diffEditorFilePath && this.diffEditorFilePath !== filePath) {
+            this.detachDiffEditor();
+        }
 
         if (!file) {
             this.openFile(filePath, true, options);

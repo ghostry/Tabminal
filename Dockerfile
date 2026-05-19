@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN sed -i 's|URIs: http://deb\.debian\.org/debian|URIs: http://mirrors.aliyun.com/debian|' /etc/apt/sources.list.d/debian.sources && \
     sed -i 's|URIs: http://deb\.debian\.org/debian-security|URIs: http://mirrors.aliyun.com/debian-security|' /etc/apt/sources.list.d/debian.sources && \
     apt update -y;\
-    apt install sudo vim screen htop iotop iftop docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential rsync -y;\
+    apt install sudo vim screen htop iotop iftop docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential rsync psmisc -y;\
     apt clean
 
 RUN npm config set registry https://registry.npmmirror.com && \

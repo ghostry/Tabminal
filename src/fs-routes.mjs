@@ -566,6 +566,52 @@ export const setupFsRoutes = (router) => {
         }
     });
 
+    router.get('/api/fs/git-show', async (ctx) => {
+        const targetPath = ctx.query.path;
+        if (typeof targetPath !== 'string' || targetPath.length === 0) {
+            ctx.status = 400;
+            ctx.body = { error: 'Path required' };
+            return;
+        }
+        try {
+            const absPath = path.resolve(baseDir, targetPath);
+            const revParse = await execFileAsync(
+                'git', ['rev-parse', '--show-toplevel'],
+                {
+                    cwd: path.dirname(absPath),
+                    timeout: 5000
+                }
+            );
+            const repoRoot = revParse.stdout.trim();
+            const relPath = path.relative(repoRoot, absPath);
+            try {
+                const result = await execFileAsync(
+                    'git',
+                    ['show', `HEAD:${relPath}`],
+                    {
+                        cwd: repoRoot,
+                        timeout: 5000,
+                        maxBuffer: 64 * 1024 * 1024
+                    }
+                );
+                ctx.body = { content: result.stdout, found: true };
+            } catch (showErr) {
+                const msg = (showErr.stderr || showErr.message || '').trim();
+                if (/exists on disk, but not in/.test(msg)
+                    || /does not exist/.test(msg)
+                    || /unknown revision/.test(msg)) {
+                    ctx.body = { content: '', found: false };
+                    return;
+                }
+                throw showErr;
+            }
+        } catch (err) {
+            const msg = (err.stderr || err.stdout || err.message || '').trim();
+            ctx.status = 500;
+            ctx.body = { error: msg || 'git show failed' };
+        }
+    });
+
     router.post('/api/fs/git-pull', async (ctx) => {
         const targetPath = ctx.request.body?.path;
         if (typeof targetPath !== 'string' || targetPath.length === 0) {
