@@ -599,8 +599,13 @@
         <main id="terminal-container" class="terminal-container">
             <div id="editor-pane" class="editor-pane" style="display: none;">
                 <div class="editor-workspace">
-                    <div id="editor-tabs" class="editor-tabs">
-                        <!-- Editor tabs injected here -->
+                    <div id="editor-tabs-bar" class="editor-tabs-bar">
+                        <button type="button" id="editor-tab-nav-prev" class="editor-tab-nav-btn editor-tab-nav-prev" title="上一个标签" style="display: none;"></button>
+                        <div id="editor-tabs" class="editor-tabs">
+                            <!-- Editor tabs injected here -->
+                        </div>
+                        <button type="button" id="editor-tab-nav-next" class="editor-tab-nav-btn editor-tab-nav-next" title="下一个标签" style="display: none;"></button>
+                        <button type="button" id="editor-tab-list-btn" class="editor-tab-list-btn" title="标签列表" style="display: none;"></button>
                     </div>
                     <div id="editor-content" class="editor-content">
                         <div id="monaco-container" class="monaco-container"></div>

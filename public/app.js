@@ -207,6 +207,9 @@ const GIT_PUSH_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" strok
 const MARKDOWN_PREVIEW_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h18"></path><path d="M3 9.5h18"></path><path d="M5 5.5V18a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5.5"></path><path d="M9 13h6"></path><path d="M9 16h4"></path></svg>';
 const MARKDOWN_SPLIT_ENABLE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M12 5v14"></path></svg>';
 const MARKDOWN_SPLIT_DISABLE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M12 5v14"></path><path d="m9.25 8.5 5.5 7"></path></svg>';
+const EDITOR_TAB_NAV_PREV_ICON_SVG = '<svg viewBox="0 0 24 24" width="12" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 6 9 12 15 18"></polyline></svg>';
+const EDITOR_TAB_NAV_NEXT_ICON_SVG = '<svg viewBox="0 0 24 24" width="12" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"></polyline></svg>';
+const EDITOR_TAB_LIST_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="20" y2="17"></line></svg>';
 const TERMINAL_FONT_FAMILY = '\'Monaspace Neon\', "SF Mono Terminal", '
     + '"SFMono-Regular", "SF Mono", "JetBrains Mono", Menlo, Consolas, '
     + 'monospace';
@@ -1377,6 +1380,25 @@ class EditorManager {
         this.pane = document.getElementById('editor-pane');
         this.resizer = document.getElementById('editor-resizer');
         this.tabsContainer = document.getElementById('editor-tabs');
+        this.tabsBar = document.getElementById('editor-tabs-bar');
+        this.tabsPrevBtn = document.getElementById('editor-tab-nav-prev');
+        this.tabsNextBtn = document.getElementById('editor-tab-nav-next');
+        this.tabsListBtn = document.getElementById('editor-tab-list-btn');
+        this.tabsPrevBtn.innerHTML = EDITOR_TAB_NAV_PREV_ICON_SVG;
+        this.tabsNextBtn.innerHTML = EDITOR_TAB_NAV_NEXT_ICON_SVG;
+        this.tabsListBtn.innerHTML = EDITOR_TAB_LIST_ICON_SVG;
+        this.tabsPrevBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.activateAdjacentEditorTab(-1);
+        };
+        this.tabsNextBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.activateAdjacentEditorTab(1);
+        };
+        this.tabsListBtn.onclick = (e) => {
+            e.stopPropagation();
+            this.toggleEditorTabListPopover(this.tabsListBtn);
+        };
         this.contentContainer = document.getElementById('editor-content');
         this.monacoContainer = document.getElementById('monaco-container');
         this.imagePreviewContainer = document.getElementById('image-preview-container');
@@ -5752,14 +5774,66 @@ class EditorManager {
         }
     }
 
+    collectEditorTabs() {
+        if (!this.currentSession) return [];
+        const state = this.currentSession.editorState;
+        const splitPath = this.getMarkdownSplitPath(this.currentSession);
+        const tabs = [];
+        if (this.hasCompactWorkspaceTabs(this.currentSession)) {
+            tabs.push({
+                kind: 'terminal',
+                key: TERMINAL_WORKSPACE_TAB_KEY,
+                label: 'Terminal'
+            });
+        }
+        for (const path of state.openFiles) {
+            const splitEnabled = this.isMarkdownSplitViewEnabled(
+                this.currentSession,
+                path
+            );
+            const name = path.split('/').pop();
+            tabs.push({
+                kind: 'file',
+                key: makeFileWorkspaceTabKey(path),
+                label: name,
+                path,
+                splitEnabled
+            });
+            if (isSupportedMarkdownPath(path) && !splitEnabled) {
+                tabs.push({
+                    kind: 'preview',
+                    key: makeMarkdownPreviewWorkspaceTabKey(path),
+                    label: `${name} (Preview)`,
+                    path,
+                    splittable: path !== splitPath && canUseMarkdownSplitTabsMode()
+                });
+            }
+        }
+        for (const agentTab of getAgentTabsForSession(this.currentSession)) {
+            tabs.push({
+                kind: 'agent',
+                key: agentTab.key,
+                label: String(getAgentDisplayLabel(agentTab) || '').trim(),
+                agentTab
+            });
+        }
+        return tabs;
+    }
+
     renderEditorTabs() {
         if (!this.currentSession) return;
         this.syncMarkdownSplitSupport(this.currentSession);
         const state = this.currentSession.editorState;
         const activeWorkspaceTabKey = this.getActiveWorkspaceTabKey();
         const splitPath = this.getMarkdownSplitPath(this.currentSession);
+        this.editorTabs = this.collectEditorTabs();
 
         this.tabsContainer.innerHTML = '';
+        this.closeEditorTabListPopover();
+        const useNav = this.editorTabs.length > 2;
+        this.tabsPrevBtn.style.display = useNav ? 'inline-flex' : 'none';
+        this.tabsNextBtn.style.display = useNav ? 'inline-flex' : 'none';
+        this.tabsListBtn.style.display = useNav ? 'inline-flex' : 'none';
         if (this.hasCompactWorkspaceTabs(this.currentSession)) {
             const tab = document.createElement('div');
             tab.className = 'editor-tab terminal-editor-tab';
@@ -5970,6 +6044,132 @@ class EditorManager {
             tab.appendChild(closeBtn);
             this.tabsContainer.appendChild(tab);
         }
+
+        const scrollActiveIntoView = () => {
+            const activeEl = this.tabsContainer.querySelector('.editor-tab.active');
+            if (!activeEl) return;
+            const container = this.tabsContainer;
+            const tabs = this.editorTabs || [];
+            const activeKey = this.getActiveWorkspaceTabKey();
+            const idx = tabs.findIndex((t) => t.key === activeKey);
+            if (idx === 0) {
+                container.scrollLeft = 0;
+                return;
+            }
+            if (idx === tabs.length - 1 && idx >= 0) {
+                container.scrollLeft = container.scrollWidth;
+                return;
+            }
+            const tabLeft = activeEl.offsetLeft;
+            const tabRight = tabLeft + activeEl.offsetWidth;
+            const viewLeft = container.scrollLeft;
+            const viewRight = viewLeft + container.clientWidth;
+            if (tabLeft < viewLeft) {
+                container.scrollLeft = tabLeft;
+            } else if (tabRight > viewRight) {
+                container.scrollLeft = tabRight - container.clientWidth;
+            }
+        };
+        scrollActiveIntoView();
+        requestAnimationFrame(scrollActiveIntoView);
+    }
+
+    activateAdjacentEditorTab(delta) {
+        const tabs = this.editorTabs || [];
+        if (tabs.length === 0) return;
+        const activeKey = this.getActiveWorkspaceTabKey();
+        let idx = tabs.findIndex((t) => t.key === activeKey);
+        if (idx === -1) idx = 0;
+        const next = (idx + delta + tabs.length) % tabs.length;
+        this.activateWorkspaceTab(tabs[next].key);
+    }
+
+    closeEditorTabListPopover() {
+        if (this.editorTabListPopover) {
+            this.editorTabListPopover.remove();
+            this.editorTabListPopover = null;
+        }
+        if (this.editorTabListPopoverHandler) {
+            document.removeEventListener(
+                'mousedown',
+                this.editorTabListPopoverHandler,
+                true
+            );
+            document.removeEventListener(
+                'keydown',
+                this.editorTabListPopoverKeyHandler,
+                true
+            );
+            this.editorTabListPopoverHandler = null;
+            this.editorTabListPopoverKeyHandler = null;
+        }
+    }
+
+    toggleEditorTabListPopover(anchorBtn) {
+        if (this.editorTabListPopover) {
+            this.closeEditorTabListPopover();
+            return;
+        }
+        const tabs = this.editorTabs || [];
+        if (tabs.length === 0) return;
+        const activeKey = this.getActiveWorkspaceTabKey();
+        const popover = document.createElement('div');
+        popover.className = 'editor-tab-list-popover';
+        popover.style.visibility = 'hidden';
+        document.body.appendChild(popover);
+
+        for (const tabInfo of tabs) {
+            const row = document.createElement('div');
+            row.className = 'editor-tab-list-row';
+            if (tabInfo.key === activeKey) row.classList.add('active');
+            const label = document.createElement('span');
+            label.className = 'editor-tab-list-row-label';
+            label.textContent = tabInfo.label || '';
+            label.title = tabInfo.label || '';
+            row.appendChild(label);
+            row.onclick = (e) => {
+                e.stopPropagation();
+                this.closeEditorTabListPopover();
+                this.activateWorkspaceTab(tabInfo.key);
+            };
+            popover.appendChild(row);
+        }
+
+        document.body.appendChild(popover);
+        this.editorTabListPopover = popover;
+
+        const btnRect = anchorBtn.getBoundingClientRect();
+        const popRect = popover.getBoundingClientRect();
+        const top = btnRect.bottom + 4;
+        const left = Math.max(4, btnRect.right - popRect.width);
+        popover.style.top = `${top}px`;
+        popover.style.left = `${left}px`;
+        popover.style.visibility = '';
+
+        this.editorTabListPopoverHandler = (event) => {
+            if (
+                popover.contains(event.target)
+                || anchorBtn.contains(event.target)
+            ) {
+                return;
+            }
+            this.closeEditorTabListPopover();
+        };
+        this.editorTabListPopoverKeyHandler = (event) => {
+            if (event.key === 'Escape') {
+                this.closeEditorTabListPopover();
+            }
+        };
+        document.addEventListener(
+            'mousedown',
+            this.editorTabListPopoverHandler,
+            true
+        );
+        document.addEventListener(
+            'keydown',
+            this.editorTabListPopoverKeyHandler,
+            true
+        );
     }
 
     activateWorkspaceTab(workspaceTabKey, isRestore = false) {
@@ -10017,33 +10217,6 @@ class Session {
             return false;
         }
         this.mainFitAddon.fit();
-        const termEl = document.getElementById('terminal');
-        const screenEl = termEl?.querySelector('.xterm-screen');
-        const canvasEl = termEl?.querySelector('canvas');
-        console.log('[fitMainTerminal]', {
-            applied: { cols: this.mainTerm.cols, rows: this.mainTerm.rows },
-            vp: {
-                vvW: window.visualViewport?.width,
-                innerW: window.innerWidth,
-                docW: document.documentElement.clientWidth,
-                dpr: window.devicePixelRatio
-            },
-            terminalDiv: {
-                clientW: termEl?.clientWidth,
-                rectW: termEl?.getBoundingClientRect?.().width
-            },
-            xtermScreen: {
-                clientW: screenEl?.clientWidth,
-                styleW: screenEl?.style?.width,
-                rectW: screenEl?.getBoundingClientRect?.().width
-            },
-            canvas: {
-                clientW: canvasEl?.clientWidth,
-                attrW: canvasEl?.width,
-                styleW: canvasEl?.style?.width
-            },
-            shellScale: getComputedStyle(document.documentElement).getPropertyValue('--shell-scale')
-        });
         return true;
     }
 
