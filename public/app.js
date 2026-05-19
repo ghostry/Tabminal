@@ -421,7 +421,8 @@ function isForcedTerminalWorkspaceMode() {
 }
 
 function getTerminalFontSize() {
-    return IS_MOBILE ? 14 : 12;
+    if (!IS_MOBILE) return 12;
+    return 10;
 }
 
 function buildMainTerminalTheme() {
@@ -10016,6 +10017,33 @@ class Session {
             return false;
         }
         this.mainFitAddon.fit();
+        const termEl = document.getElementById('terminal');
+        const screenEl = termEl?.querySelector('.xterm-screen');
+        const canvasEl = termEl?.querySelector('canvas');
+        console.log('[fitMainTerminal]', {
+            applied: { cols: this.mainTerm.cols, rows: this.mainTerm.rows },
+            vp: {
+                vvW: window.visualViewport?.width,
+                innerW: window.innerWidth,
+                docW: document.documentElement.clientWidth,
+                dpr: window.devicePixelRatio
+            },
+            terminalDiv: {
+                clientW: termEl?.clientWidth,
+                rectW: termEl?.getBoundingClientRect?.().width
+            },
+            xtermScreen: {
+                clientW: screenEl?.clientWidth,
+                styleW: screenEl?.style?.width,
+                rectW: screenEl?.getBoundingClientRect?.().width
+            },
+            canvas: {
+                clientW: canvasEl?.clientWidth,
+                attrW: canvasEl?.width,
+                styleW: canvasEl?.style?.width
+            },
+            shellScale: getComputedStyle(document.documentElement).getPropertyValue('--shell-scale')
+        });
         return true;
     }
 
