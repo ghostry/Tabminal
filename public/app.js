@@ -743,6 +743,11 @@ if (sidebarToggle && sidebar && sidebarOverlay) {
         sidebar.classList.remove('open');
         sidebarOverlay.classList.remove('open');
     };
+    window.__tabminalCloseSidebarIfFloating = () => {
+        if (isCompactWorkspaceMode() && sidebar.classList.contains('open')) {
+            closeSidebar();
+        }
+    };
 
     sidebarToggle.addEventListener('pointerdown', (event) => {
         if (!isCompactWorkspaceMode()) {
@@ -3889,15 +3894,6 @@ class EditorManager {
             return false;
         }
 
-        const renameButton = row.querySelector('.file-tree-rename-btn');
-        if (
-            renameButton instanceof HTMLButtonElement
-            && !renameButton.disabled
-        ) {
-            renameButton.click();
-            return true;
-        }
-
         this.beginTreeRename(session, {
             path: selectedPath,
             name: nameEl.textContent || '',
@@ -4008,6 +4004,161 @@ class EditorManager {
         session.treeRenameSubmitting = false;
         session.pendingTreeRenameFocusPath = file.path;
         this.requestSessionTreeRefresh(session, { force: true });
+    }
+
+    showTreeContextMenu(session, file, clientX, clientY) {
+        if (!session || !file) return;
+        document
+            .querySelectorAll('.file-tree-context-menu')
+            .forEach((el) => el.remove());
+
+        const menu = document.createElement('div');
+        menu.className = 'file-tree-context-menu';
+        menu.tabIndex = -1;
+
+        const dismiss = () => {
+            menu.remove();
+            document.removeEventListener('mousedown', onOutside, true);
+            document.removeEventListener('touchstart', onOutside, true);
+            document.removeEventListener('keydown', onKeydown, true);
+            window.removeEventListener('resize', dismiss);
+            window.removeEventListener('blur', dismiss);
+        };
+        const onOutside = (event) => {
+            if (!menu.contains(event.target)) {
+                dismiss();
+            }
+        };
+        const onKeydown = (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                dismiss();
+                session.fileTreeElement?.focus({ preventScroll: true });
+            }
+        };
+
+        const copyText = async (text, label) => {
+            try {
+                if (navigator.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.opacity = '0';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    textarea.remove();
+                }
+                alert(text, { title: label, type: 'success' });
+            } catch (err) {
+                alert(err.message || 'Copy failed', {
+                    title: label,
+                    type: 'error'
+                });
+            }
+        };
+
+        const rootDir = session.cwd || session.initialCwd || '';
+        const computeRelativePath = () => {
+            if (!rootDir) return file.path;
+            let base = rootDir;
+            if (!base.endsWith('/')) base += '/';
+            if (file.path === rootDir) return file.name;
+            if (file.path.startsWith(base)) {
+                return file.path.slice(base.length);
+            }
+            return file.path;
+        };
+
+        const items = [];
+        if (!file.isDirectory) {
+            items.push({
+                label: '打开',
+                action: async () => {
+                    await this.openFile(file.path, session, {
+                        focusEditor: false
+                    });
+                    this.focusTreePath(session, file.path);
+                    session.pendingTreeFocusPath = file.path;
+                    this.requestSessionTreeRefresh(session);
+                    window.__tabminalCloseSidebarIfFloating?.();
+                }
+            });
+        }
+        items.push({
+            label: '复制文件名',
+            action: () => copyText(file.name, '已复制文件名')
+        });
+        items.push({
+            label: '复制路径',
+            action: () => copyText(file.path, '已复制路径')
+        });
+        items.push({
+            label: '复制相对路径',
+            action: () => copyText(computeRelativePath(), '已复制相对路径')
+        });
+        if (file.renameable) {
+            items.push({
+                label: '重命名',
+                action: () => this.beginTreeRename(session, file)
+            });
+        }
+        if (file.deleteable) {
+            items.push({
+                label: '删除',
+                danger: true,
+                action: () => void this.deleteTreeEntry(session, file)
+            });
+        }
+
+        items.forEach((item) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'file-tree-context-menu-item';
+            if (item.danger) {
+                btn.classList.add('is-danger');
+            }
+            btn.textContent = item.label;
+            btn.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                dismiss();
+                try {
+                    const result = item.action();
+                    if (result && typeof result.then === 'function') {
+                        result.catch(() => {});
+                    }
+                } catch {
+                    // ignore
+                }
+            };
+            menu.appendChild(btn);
+        });
+
+        document.body.appendChild(menu);
+
+        const menuRect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let x = clientX;
+        let y = clientY;
+        if (x + menuRect.width > vw - 4) {
+            x = Math.max(4, vw - menuRect.width - 4);
+        }
+        if (y + menuRect.height > vh - 4) {
+            y = Math.max(4, vh - menuRect.height - 4);
+        }
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+
+        document.addEventListener('mousedown', onOutside, true);
+        document.addEventListener('touchstart', onOutside, true);
+        document.addEventListener('keydown', onKeydown, true);
+        window.addEventListener('resize', dismiss);
+        window.addEventListener('blur', dismiss);
     }
 
     async deleteTreeEntry(session, file) {
@@ -4381,25 +4532,14 @@ class EditorManager {
         }
 
         let renameButton = row.querySelector('.file-tree-rename-btn');
-        if (!renameButton) {
-            renameButton = document.createElement('button');
-            renameButton.type = 'button';
-            renameButton.className = 'file-tree-rename-btn';
-            renameButton.title = 'Rename';
-            renameButton.setAttribute('aria-label', `Rename ${file.name}`);
-            renameButton.innerHTML = RENAME_ICON_SVG;
-            row.appendChild(renameButton);
+        if (renameButton) {
+            renameButton.remove();
         }
+        renameButton = null;
 
-        let deleteButton = row.querySelector('.file-tree-delete-btn');
-        if (!deleteButton) {
-            deleteButton = document.createElement('button');
-            deleteButton.type = 'button';
-            deleteButton.className = 'file-tree-delete-btn';
-            deleteButton.title = 'Delete';
-            deleteButton.setAttribute('aria-label', `Delete ${file.name}`);
-            deleteButton.innerHTML = DELETE_ICON_SVG;
-            row.appendChild(deleteButton);
+        const existingDeleteButton = row.querySelector('.file-tree-delete-btn');
+        if (existingDeleteButton) {
+            existingDeleteButton.remove();
         }
 
         let resetButton = row.querySelector('.file-tree-reset-btn');
@@ -4509,33 +4649,6 @@ class EditorManager {
                 }
             }
         name.style.display = isEditing ? 'none' : '';
-        renameButton.style.display = isEditing ? 'none' : '';
-        deleteButton.style.display = isEditing ? 'none' : '';
-        renameButton.hidden = !file.renameable;
-        renameButton.disabled = !file.renameable;
-        renameButton.title = `Rename ${file.name}`;
-        renameButton.setAttribute('aria-label', `Rename ${file.name}`);
-        renameButton.onmousedown = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-        };
-        renameButton.onclick = (event) => {
-            event.stopPropagation();
-            this.beginTreeRename(session, file);
-        };
-
-        deleteButton.hidden = !file.deleteable;
-        deleteButton.disabled = !file.deleteable;
-        deleteButton.title = `Delete ${file.name}`;
-        deleteButton.setAttribute('aria-label', `Delete ${file.name}`);
-        deleteButton.onmousedown = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-        };
-        deleteButton.onclick = (event) => {
-            event.stopPropagation();
-            void this.deleteTreeEntry(session, file);
-        };
 
         const isResettable = file.gitStatus && file.gitStatus[1] === 'M' && !file.isDirectory;
         resetButton.style.display = isEditing ? 'none' : '';
@@ -4603,12 +4716,6 @@ class EditorManager {
 
         row.onclick = async (e) => {
             e.stopPropagation();
-            if (e.target.closest('.file-tree-rename-btn')) {
-                return;
-            }
-            if (e.target.closest('.file-tree-delete-btn')) {
-                return;
-            }
             if (e.target.closest('.file-tree-reset-btn')) {
                 return;
             }
@@ -4665,20 +4772,102 @@ class EditorManager {
                 session.fileTreeElement?.focus({ preventScroll: true });
                 return;
             }
+        };
 
+        row.ondblclick = async (e) => {
+            e.stopPropagation();
+            if (
+                e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-rename-input')
+            ) {
+                return;
+            }
+            if (file.isDirectory) {
+                return;
+            }
             await this.openFile(file.path, session, {
                 focusEditor: false
             });
             this.focusTreePath(session, file.path);
             session.pendingTreeFocusPath = file.path;
             this.requestSessionTreeRefresh(session);
+            window.__tabminalCloseSidebarIfFloating?.();
         };
+
+        row.oncontextmenu = (e) => {
+            if (
+                e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-rename-input')
+            ) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            this.setSelectedTreePath(session, file.path, {
+                preserveFocus: true
+            });
+            this.showTreeContextMenu(session, file, e.clientX, e.clientY);
+        };
+
+        let longPressTimer = 0;
+        let longPressFired = false;
+        let longPressStartX = 0;
+        let longPressStartY = 0;
+        const cancelLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = 0;
+            }
+        };
+        row.ontouchstart = (e) => {
+            if (
+                e.target.closest('.file-tree-reset-btn')
+                || e.target.closest('.file-tree-rename-input')
+            ) {
+                return;
+            }
+            longPressFired = false;
+            const touch = e.touches[0];
+            longPressStartX = touch?.clientX || 0;
+            longPressStartY = touch?.clientY || 0;
+            cancelLongPress();
+            longPressTimer = window.setTimeout(() => {
+                longPressTimer = 0;
+                longPressFired = true;
+                this.setSelectedTreePath(session, file.path, {
+                    preserveFocus: true
+                });
+                this.showTreeContextMenu(
+                    session,
+                    file,
+                    longPressStartX,
+                    longPressStartY
+                );
+            }, 500);
+        };
+        row.ontouchmove = (e) => {
+            const touch = e.touches[0];
+            if (!touch) return;
+            if (
+                Math.abs(touch.clientX - longPressStartX) > 8
+                || Math.abs(touch.clientY - longPressStartY) > 8
+            ) {
+                cancelLongPress();
+            }
+        };
+        row.ontouchend = (e) => {
+            cancelLongPress();
+            if (longPressFired) {
+                e.preventDefault();
+                e.stopPropagation();
+                longPressFired = false;
+            }
+        };
+        row.ontouchcancel = cancelLongPress;
 
         row.onmousedown = (event) => {
             if (
-                event.target.closest('.file-tree-rename-btn')
-                || event.target.closest('.file-tree-delete-btn')
-                || event.target.closest('.file-tree-reset-btn')
+                event.target.closest('.file-tree-reset-btn')
                 || event.target.closest('.file-tree-rename-input')
             ) {
                 return;
@@ -16310,7 +16499,6 @@ function createTabElement(session) {
     fileTree.addEventListener('mousedown', (event) => {
         if (
             event.target.closest('.file-tree-rename-input')
-            || event.target.closest('.file-tree-rename-btn')
         ) {
             return;
         }
