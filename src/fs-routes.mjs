@@ -546,7 +546,7 @@ export const setupFsRoutes = (router) => {
                     cwd: baseDir,
                     timeout: 2000
                 });
-            } catch (err) {
+            } catch {
                 ctx.status = 400;
                 ctx.body = { error: 'Not a git repository' };
                 return;

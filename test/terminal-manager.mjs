@@ -130,6 +130,58 @@ describe('TerminalManager workspace sync', () => {
         assert.deepEqual(listed[0].editorState, workspaceState);
     });
 
+    it('returns minimal session state for heartbeat listings', () => {
+        const manager = new TerminalManager();
+        manager.sessions.set('session-4', {
+            id: 'session-4',
+            title: 'bash',
+            cwd: '/tmp',
+            env: 'SECRET=value',
+            pty: { cols: 120, rows: 30 },
+            closed: false,
+            exitStatus: null,
+            managed: null,
+            editorState: createWorkspaceState({
+                openFiles: ['/tmp/file.js']
+            }),
+            executions: [{ command: 'npm test' }]
+        });
+        manager.sessions.set('session-5', {
+            id: 'session-5',
+            title: 'agent',
+            cwd: '/repo',
+            env: '',
+            pty: { cols: 80, rows: 24 },
+            closed: true,
+            exitStatus: { exitCode: 0, signal: null },
+            managed: {
+                kind: 'agent-terminal',
+                agentId: 'codex',
+                terminalId: 'term-1'
+            },
+            editorState: createWorkspaceState(),
+            executions: []
+        });
+
+        const listed = manager.listHeartbeatSessions();
+        assert.deepEqual(listed, [
+            {
+                id: 'session-4',
+                closed: false
+            },
+            {
+                id: 'session-5',
+                closed: true,
+                exitStatus: { exitCode: 0, signal: null },
+                managed: {
+                    kind: 'agent-terminal',
+                    agentId: 'codex',
+                    terminalId: 'term-1'
+                }
+            }
+        ]);
+    });
+
     it('preserves markdown split path in shared workspace snapshots', () => {
         const manager = new TerminalManager();
         const session = {

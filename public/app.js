@@ -197,10 +197,8 @@ const THOUGHT_SELECT_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15"
 const TERMINAL_TAB_MODE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M4 9h16"></path><path d="m9 15 3-3 3 3"></path></svg>';
 const TERMINAL_AUTO_MODE_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="5" rx="1.5"></rect><rect x="4" y="14" width="16" height="5" rx="1.5"></rect></svg>';
 const PLUS_ICON_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>';
-const RENAME_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="m12 20 7-7"></path><path d="M16 6.5a1.8 1.8 0 1 1 2.5 2.5L8 19.5 4 20l.5-4L16 6.5Z"></path></svg>';
 const RESET_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>';
 const DIFF_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v12"></path><path d="M9 18v2"></path><path d="M6 7l3-3 3 3"></path><path d="M15 20V8"></path><path d="M15 6V4"></path><path d="M18 17l-3 3-3-3"></path></svg>';
-const DELETE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 12h10l1-12"></path><path d="M9 7V4h6v3"></path></svg>';
 const NEW_FOLDER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h4l2 2h6a2.5 2.5 0 0 1 2.5 2.5V17A2.5 2.5 0 0 1 18 19.5H6A2.5 2.5 0 0 1 3.5 17Z"></path><path d="M12 10.5v5"></path><path d="M9.5 13h5"></path></svg>';
 const NEW_FILE_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4V20.5H7A2.5 2.5 0 0 1 4.5 18V6A2.5 2.5 0 0 1 7 3.5Z"></path><path d="M14 3.5V8h4"></path><path d="M12 11v6"></path><path d="M9 14h6"></path></svg>';
 const GIT_PULL_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"></path><path d="m7 15 5 5 5-5"></path><path d="M5 4h4M5 4v4"></path></svg>';
@@ -848,16 +846,8 @@ function handlePrimaryRuntimeVersion(data) {
 
     if (!primaryServerBootId) {
         primaryServerBootId = bootId;
-        if (storedBootId === bootId && !needsShellReload) {
-            return;
-        }
-        const persisted = persistRuntimeBootId(bootId);
-        if (persisted && needsShellReload && !runtimeReloadScheduled) {
-            runtimeReloadScheduled = true;
-            console.info(
-                '[Runtime] Syncing app shell cache key with server boot id.'
-            );
-            window.location.reload();
+        if (storedBootId !== bootId) {
+            persistRuntimeBootId(bootId);
         }
         return;
     }
@@ -889,6 +879,7 @@ function handlePrimaryRuntimeVersion(data) {
 
 class AuthManager {
     showLoginModal(errorMsg = '') {
+        window.__tabminalMarkBootSuccess?.();
         loginModal.style.display = 'flex';
         passwordInput.value = '';
         passwordInput.focus();
@@ -1360,7 +1351,9 @@ class ServerClient {
     startHeartbeat() {
         if (!this.isAuthenticated || this.heartbeatTimer) return;
         this.heartbeatTimer = setInterval(() => {
-            syncServer(this);
+            if (!this.syncPromise) {
+                syncServer(this);
+            }
         }, HEARTBEAT_INTERVAL_MS);
     }
 
@@ -15985,11 +15978,21 @@ async function syncServer(server) {
         const startTime = Date.now();
 
         try {
-            const response = await server.fetch('/api/heartbeat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ updates })
-            });
+            const abortController = new AbortController();
+            const abortTimer = setTimeout(() => abortController.abort(), 30_000);
+            let response;
+            try {
+                response = await server.fetch('/api/heartbeat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ updates }),
+                    signal: abortController.signal
+                });
+                clearTimeout(abortTimer);
+            } catch (error) {
+                clearTimeout(abortTimer);
+                throw error;
+            }
 
             const latency = Date.now() - startTime;
 
@@ -16072,10 +16075,21 @@ async function syncServer(server) {
                 }
             }
         } catch (error) {
+            const isAbort =
+                error?.name === 'AbortError' || error?.message?.includes('aborted');
             if (!wasReconnecting) {
-                console.warn(
-                    `[Heartbeat] ${getDisplayHost(server)} unavailable (${formatHeartbeatError(error)}). Reconnecting...`
-                );
+                if (isAbort) {
+                    console.warn(
+                        `[Heartbeat] ${getDisplayHost(server)} timed out after 30s. Skipping...`
+                    );
+                } else {
+                    console.warn(
+                        `[Heartbeat] ${getDisplayHost(server)} unavailable (${formatHeartbeatError(error)}). Reconnecting...`
+                    );
+                }
+            }
+            if (isAbort) {
+                return;
             }
             if (!server.isAuthenticated) return;
             server.nextSyncAt = Date.now() + RECONNECT_RETRY_MS;
@@ -16595,9 +16609,13 @@ function reconcileSessions(server, remoteSessions) {
 async function createNewSession(server = getActiveServer(), options = {}) {
     if (!server) return;
     if (server.needsLogin || !server.isAuthenticated) {
-        const password = window.prompt(`Password for ${getDisplayHost(server)}`);
-        if (!password) return;
-        await server.login(password);
+        if (server.isPrimary) {
+            auth.showLoginModal('Authentication required.');
+        } else {
+            openServerModal('reconnect', server);
+        }
+        renderServerControls();
+        return;
     }
     try {
         const request = {};
@@ -17430,11 +17448,8 @@ function renderServerControls() {
                             }
                         }
                         const opened = openServerModal('reconnect', server);
-                        if (!opened) {
-                            const password = window.prompt(`Password for ${hostName}`);
-                            if (!password) return;
-                            await server.login(password);
-                            await fetchExpandedPaths(server);
+                        if (!opened && server.isPrimary) {
+                            auth.showLoginModal('Authentication required.');
                         }
                     }
                 } else {
@@ -18924,8 +18939,8 @@ document.addEventListener('keydown', (e) => {
 async function bootApp() {
     try {
         bootstrapServers();
-        await initApp();
         window.__tabminalMarkBootSuccess?.();
+        await initApp();
     } catch (error) {
         console.error('[Boot] Failed to start Tabminal:', error);
         window.__tabminalMarkBootFailure?.(

@@ -579,6 +579,19 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
         }));
     }
 
+    /**
+     * Lightweight session listing for the heartbeat endpoint.
+     * Only includes topology and state that WebSocket meta/status may miss.
+     */
+    listHeartbeatSessions() {
+        return Array.from(this.sessions.values()).map(s => ({
+            id: s.id,
+            closed: !!s.closed,
+            ...(s.exitStatus ? { exitStatus: s.exitStatus } : {}),
+            ...(s.managed ? { managed: s.managed } : {})
+        }));
+    }
+
     dispose() {
         debugLog('[Manager] Disposing all sessions.');
         this.disposing = true;

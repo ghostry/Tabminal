@@ -450,6 +450,14 @@
 
             const scheduleBootRecovery = (() => {
                 let timer = 0;
+                const hasVisibleLoginModal = () => {
+                    const modal = document.getElementById('login-modal');
+                    return !!(
+                        modal
+                        && modal.style.display !== 'none'
+                        && getComputedStyle(modal).display !== 'none'
+                    );
+                };
                 return (reason, delay = bootRecoveryReloadDelayMs) => {
                     const state = window.__tabminalBootState;
                     if (!state || state.status === 'success') {
@@ -463,6 +471,11 @@
                     timer = window.setTimeout(async () => {
                         timer = 0;
                         if (state.status === 'success') {
+                            return;
+                        }
+                        if (hasVisibleLoginModal()) {
+                            state.status = 'success';
+                            clearBootRetryState();
                             return;
                         }
                         const reachable = await probeRuntimeReachable();

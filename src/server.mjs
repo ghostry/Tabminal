@@ -404,7 +404,7 @@ router.all('/api/heartbeat', async (ctx) => {
     }
 
     ctx.body = {
-        sessions: terminalManager.listSessions(),
+        sessions: terminalManager.listHeartbeatSessions(),
         agents: await acpManager.listInventory(),
         fileWriteResults,
         system: systemMonitor.getStats(),
