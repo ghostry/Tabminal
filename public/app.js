@@ -1543,6 +1543,25 @@ class EditorManager {
             || getAgentTabsForSession(session).length > 0;
     }
 
+    shouldDefaultTerminalToWorkspaceTab(session = this.currentSession) {
+        if (
+            !session
+            || isForcedTerminalWorkspaceMode()
+            || this.isTerminalTabPinned(session)
+        ) {
+            return false;
+        }
+        return true;
+    }
+
+    defaultTerminalToWorkspaceTab(session = this.currentSession) {
+        if (!this.shouldDefaultTerminalToWorkspaceTab(session)) {
+            return false;
+        }
+        session.sharedWorkspaceState.terminalDisplayMode = 'tab';
+        return true;
+    }
+
     initTerminalControls() {
         if (!this.terminalWrapper) return;
 
@@ -6764,6 +6783,8 @@ class EditorManager {
         if (!this.currentSession || !filePath) return;
 
         const state = this.currentSession.editorState;
+        const defaultedTerminalTab = !isRestore
+            && this.defaultTerminalToWorkspaceTab(this.currentSession);
         if (!isRestore && state.activeFilePath && state.activeFilePath !== filePath) {
             const currentGlobal = this.getModel(state.activeFilePath);
             if (currentGlobal && currentGlobal.type === 'text' && this.editor) {
@@ -6779,14 +6800,16 @@ class EditorManager {
             makeMarkdownPreviewWorkspaceTabKey(filePath);
         this.currentSession.workspaceState.lastNonTerminalTabKey =
             makeMarkdownPreviewWorkspaceTabKey(filePath);
-        if (!isRestore) {
+        if (!isRestore || defaultedTerminalTab) {
             this.currentSession.saveState({ touchWorkspace: true });
         }
         const file = this.getModel(filePath);
 
         this.renderEditorTabs();
         this.emptyState.style.display = 'none';
-        this.syncTerminalWorkspacePlacement();
+        this.syncTerminalWorkspacePlacement(
+            this.currentSession.workspaceState.activeTabKey
+        );
 
         if (!file) {
             void this.openFile(filePath, true, {
@@ -6819,6 +6842,8 @@ class EditorManager {
         if (!filePath) return;
         const focusEditor = options.focusEditor !== false;
         const state = this.currentSession.editorState;
+        const defaultedTerminalTab = !isRestore
+            && this.defaultTerminalToWorkspaceTab(this.currentSession);
 
         if (!isRestore && state.activeFilePath && state.activeFilePath !== filePath) {
             const currentGlobal = this.getModel(state.activeFilePath);
@@ -6831,14 +6856,16 @@ class EditorManager {
         this.currentSession.workspaceState.activeTabKey = makeFileWorkspaceTabKey(filePath);
         this.currentSession.workspaceState.lastNonTerminalTabKey =
             makeFileWorkspaceTabKey(filePath);
-        if (!isRestore) {
+        if (!isRestore || defaultedTerminalTab) {
             this.currentSession.saveState({ touchWorkspace: true });
         }
         const file = this.getModel(filePath);
 
         this.renderEditorTabs();
         this.emptyState.style.display = 'none';
-        this.syncTerminalWorkspacePlacement();
+        this.syncTerminalWorkspacePlacement(
+            this.currentSession.workspaceState.activeTabKey
+        );
 
         if (this.diffFiles && this.diffFiles.has(filePath)) {
             this.showDiffForActiveFile(filePath);
@@ -6971,11 +6998,13 @@ class EditorManager {
             }
         }
 
+        const defaultedTerminalTab = !isRestore
+            && this.defaultTerminalToWorkspaceTab(this.currentSession);
         this.currentSession.workspaceState.activeTabKey = agentTabKey;
         this.currentSession.workspaceState.lastNonTerminalTabKey = agentTabKey;
         noteRecentAgentTab(this.currentSession, agentTabKey);
         agentTab.needsAttention = false;
-        if (!isRestore) {
+        if (!isRestore || defaultedTerminalTab) {
             this.currentSession.saveState({ touchWorkspace: true });
         }
         this.renderEditorTabs();
