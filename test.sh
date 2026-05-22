@@ -1,1 +1,1 @@
-npm start -- --host 0.0.0.0 --port 7083 --password admin --accept-terms
+npm start -- --host 0.0.0.0 --port 7081 --password admin --accept-terms
