@@ -278,13 +278,26 @@ async function getGitStatusMap(dirPath) {
             return null;
         }
 
+        const branchStatus = await execFileAsync(
+            'git',
+            ['status', '--porcelain=v2', '--branch'],
+            {
+                cwd: repoRoot,
+                timeout: 5000
+            }
+        );
+        const aheadMatch = branchStatus.stdout.match(
+            /^# branch\.ab \+(\d+) -(\d+)$/m
+        );
+        const ahead = aheadMatch ? Number.parseInt(aheadMatch[1], 10) : 0;
+
         const result = await execFileAsync('git', ['status', '--porcelain'], {
             cwd: repoRoot,
             timeout: 5000
         });
 
         if (!result.stdout.trim()) {
-            return null;
+            return { statusMap: new Map(), repoRoot, ahead };
         }
 
         const statusMap = new Map();
@@ -297,7 +310,7 @@ async function getGitStatusMap(dirPath) {
             if (arrowIndex !== -1) fileName = fileName.slice(arrowIndex + 4);
             statusMap.set(path.normalize(fileName), status);
         }
-        return { statusMap, repoRoot };
+        return { statusMap, repoRoot, ahead };
     } catch {
         return null;
     }
@@ -447,7 +460,13 @@ export const setupFsRoutes = (router) => {
 
             ctx.body = {
                 items,
-                creatable: renameable
+                creatable: renameable,
+                git: gitData
+                    ? {
+                        ahead: gitData.ahead || 0,
+                        hasPushableChanges: (gitData.ahead || 0) > 0
+                    }
+                    : null
             };
         } catch (err) {
             console.error('FS List Error:', err);

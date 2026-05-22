@@ -3722,7 +3722,8 @@ class EditorManager {
                         : [],
                 creatable: Array.isArray(payload)
                     ? false
-                    : !!payload?.creatable
+                    : !!payload?.creatable,
+                git: Array.isArray(payload) ? null : payload?.git || null
             };
         })().finally(() => {
             this.treeDirectoryFetches.delete(key);
@@ -4553,6 +4554,7 @@ class EditorManager {
             if (!response.ok) {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
+            this.requestSessionTreeRefresh(session);
             alert(data.output || 'Everything up-to-date.', { title: 'Git Push' });
         } catch (err) {
             alert(err.message || 'git push failed', { type: 'error', title: 'Git Push' });
@@ -4662,7 +4664,7 @@ class EditorManager {
         return session.sharedWorkspaceState.expandedPaths.includes(filePath);
     }
 
-    updateTreeCreateRow(list, dirPath, creatable, session) {
+    updateTreeCreateRow(list, dirPath, creatable, git, session) {
         let row = Array.from(list.children).find(
             (child) => child.classList?.contains('file-tree-create-entry')
         );
@@ -4741,6 +4743,7 @@ class EditorManager {
         }
 
         const isRootDir = dirPath === session.cwd;
+        const hasPushableChanges = !!git?.hasPushableChanges;
         const gitPullButton = row.querySelector('.file-tree-git-pull-btn');
         const gitPushButton = row.querySelector('.file-tree-git-push-btn');
 
@@ -4757,7 +4760,7 @@ class EditorManager {
         }
 
         if (gitPushButton instanceof HTMLButtonElement) {
-            gitPushButton.hidden = !isRootDir;
+            gitPushButton.hidden = !isRootDir || !hasPushableChanges;
             gitPushButton.onmousedown = (event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -5195,7 +5198,7 @@ class EditorManager {
         }
     }
 
-    reconcileTreeList(list, dirPath, files, creatable, session) {
+    reconcileTreeList(list, dirPath, files, creatable, git, session) {
         const existingItems = new Map();
         Array.from(list.children).forEach((child) => {
             if (child.tagName === 'LI' && child.dataset.path) {
@@ -5223,7 +5226,7 @@ class EditorManager {
             list.appendChild(li);
         }
 
-        this.updateTreeCreateRow(list, dirPath, creatable, session);
+        this.updateTreeCreateRow(list, dirPath, creatable, git, session);
     }
 
     initMonaco() {
@@ -6097,6 +6100,7 @@ class EditorManager {
             dirPath,
             listing.files,
             listing.creatable,
+            listing.git,
             session
         );
         if ((session.fileTreeRenderToken || 0) !== renderToken) {
