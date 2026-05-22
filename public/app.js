@@ -2472,6 +2472,49 @@ class EditorManager {
         this.renderEditorTabs();
     }
 
+    saveActiveTextFileViaHeartbeat() {
+        const session = this.currentSession;
+        const filePath = session?.editorState?.activeFilePath || '';
+        if (!this.isActiveTextFile(session, filePath) || !this.editor) {
+            return false;
+        }
+
+        const entry = this.getTextFileEntry(filePath, session);
+        if (!entry || entry.readonly) {
+            return false;
+        }
+
+        const content = this.editor.getValue();
+        const pendingWrite = this.getPendingFileWrite(session, filePath);
+        if (
+            pendingWrite?.blocked
+            && pendingWrite.content === content
+        ) {
+            alert('Resolve the save conflict before saving again.', {
+                type: 'warning',
+                title: 'Save Blocked'
+            });
+            return true;
+        }
+
+        if (
+            content !== (entry.content || '')
+            || (entry.contentVersion || '') !== (entry.version || '')
+            || pendingWrite
+        ) {
+            this.queuePendingFileWrite(session, filePath, content, {
+                expectedVersion: pendingWrite?.expectedVersion
+                    || entry.version
+                    || '',
+                blocked: false,
+                force: pendingWrite?.force === true
+            });
+        }
+
+        requestImmediateServerSync(session.server, 0);
+        return true;
+    }
+
     getPendingFileWrite(session, filePath) {
         if (!session || !filePath) return null;
         const pending = getPendingSession(session.key);
@@ -5227,6 +5270,13 @@ class EditorManager {
                     );
                 }
             });
+
+            this.editor.addCommand(
+                monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+                () => {
+                    this.saveActiveTextFileViaHeartbeat();
+                }
+            );
             
             monaco.editor.defineTheme('solarized-dark', {
                 base: 'vs-dark',
@@ -18760,8 +18810,35 @@ document.addEventListener('keydown', (e) => {
     }
 }, true);
 
+function handleEditorSaveShortcut(event) {
+    if (
+        event.key?.toLowerCase() !== 's'
+        || event.shiftKey
+        || event.altKey
+        || (!event.ctrlKey && !event.metaKey)
+    ) {
+        return false;
+    }
+    if (
+        !editorManager?.editor
+        || !isUiElementVisible(editorManager.monacoContainer)
+        || typeof editorManager.editor.hasTextFocus !== 'function'
+        || !editorManager.editor.hasTextFocus()
+    ) {
+        return false;
+    }
+
+    event.preventDefault();
+    return editorManager.saveActiveTextFileViaHeartbeat();
+}
+
 // Keyboard Shortcuts
 document.addEventListener('keydown', (e) => {
+    if (handleEditorSaveShortcut(e)) {
+        e.stopImmediatePropagation();
+        return;
+    }
+
     if (
         e.key === 'Escape'
         && shortcutsModal
