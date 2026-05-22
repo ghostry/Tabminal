@@ -334,6 +334,12 @@ const acpManager = new AcpManager({ terminalManager });
 setupFsRoutes(router);
 
 // API routes for session management
+router.get('/api/system', (ctx) => {
+    ctx.body = {
+        system: systemMonitor.getStaticInfo()
+    };
+});
+
 router.all('/api/heartbeat', async (ctx) => {
     const fileWriteResults = [];
     if (ctx.method === 'POST') {
@@ -405,7 +411,7 @@ router.all('/api/heartbeat', async (ctx) => {
 
     ctx.body = {
         sessions: terminalManager.listHeartbeatSessions(),
-        agents: await acpManager.listInventory(),
+        agents: acpManager.listHeartbeatInventory(),
         fileWriteResults,
         system: systemMonitor.getStats(),
         runtime: {
@@ -508,7 +514,14 @@ router.put('/api/cluster', async (ctx) => {
 });
 
 router.get('/api/agents', async (ctx) => {
-    ctx.body = await acpManager.listState();
+    const full = ['1', 'true', 'yes'].includes(
+        String(ctx.query?.full || '').toLowerCase()
+    );
+    const sinceValue = Number.parseInt(String(ctx.query?.since || ''), 10);
+    ctx.body = await acpManager.listState({
+        full,
+        since: Number.isFinite(sinceValue) ? sinceValue : NaN
+    });
 });
 
 router.get('/api/agents/sessions', async (ctx) => {

@@ -4007,6 +4007,33 @@ export class AcpManager {
         this.availabilityProbes = options.availabilityProbes
             || DEFAULT_AVAILABILITY_PROBES;
         this.configLoaded = false;
+        this.stateRevision = 0;
+        this.definitionsRevision = 0;
+        this.tabRevisions = new Map();
+        this.deletedTabRevisions = new Map();
+    }
+
+    #nextStateRevision() {
+        this.stateRevision += 1;
+        return this.stateRevision;
+    }
+
+    #markDefinitionsChanged() {
+        this.definitionsRevision = this.#nextStateRevision();
+    }
+
+    #markTabChanged(tabId) {
+        const id = String(tabId || '').trim();
+        if (!id) return;
+        this.deletedTabRevisions.delete(id);
+        this.tabRevisions.set(id, this.#nextStateRevision());
+    }
+
+    #markTabDeleted(tabId) {
+        const id = String(tabId || '').trim();
+        if (!id) return;
+        this.tabRevisions.delete(id);
+        this.deletedTabRevisions.set(id, this.#nextStateRevision());
     }
 
     #getDefinitionAvailabilityOverride(agentId) {
@@ -4014,6 +4041,7 @@ export class AcpManager {
         if (!entry) return null;
         if (entry.expiresAt <= Date.now()) {
             this.definitionAvailabilityOverrides.delete(agentId);
+            this.#markDefinitionsChanged();
             return null;
         }
         return entry;
@@ -4025,10 +4053,13 @@ export class AcpManager {
             reason: String(availability.reason || ''),
             expiresAt: Date.now() + this.availabilityOverrideTtlMs
         });
+        this.#markDefinitionsChanged();
     }
 
     #clearDefinitionAvailabilityOverride(agentId) {
-        this.definitionAvailabilityOverrides.delete(agentId);
+        if (this.definitionAvailabilityOverrides.delete(agentId)) {
+            this.#markDefinitionsChanged();
+        }
     }
 
     #recordDefinitionStartupFailure(definition, error) {
@@ -4121,6 +4152,7 @@ export class AcpManager {
             agentId,
             this.getAgentConfigVersion(agentId) + 1
         );
+        this.#markDefinitionsChanged();
         await this.queuePersistence(() => this.saveConfigs(this.agentConfigs));
         return this.getSerializedAgentConfig(agentId);
     }
@@ -4135,6 +4167,7 @@ export class AcpManager {
             agentId,
             this.getAgentConfigVersion(agentId) + 1
         );
+        this.#markDefinitionsChanged();
         await this.queuePersistence(() => this.saveConfigs(this.agentConfigs));
         return this.getSerializedAgentConfig(agentId);
     }
@@ -4168,7 +4201,8 @@ export class AcpManager {
             };
             this.runtimes.set(runtimeStoreKey, runtimeEntry);
             createdRuntime = true;
-            runtime.on('tab_dirty', () => {
+            runtime.on('tab_dirty', (event = {}) => {
+                this.#markTabChanged(event.tabId);
                 this.schedulePersistTabs();
             });
             runtime.on('runtime_exit', () => {
@@ -4176,6 +4210,7 @@ export class AcpManager {
                 for (const [tabId, tabEntry] of this.tabs.entries()) {
                     if (tabEntry.runtime !== runtime) continue;
                     this.tabs.delete(tabId);
+                    this.#markTabDeleted(tabId);
                 }
                 this.runtimes.delete(runtimeStoreKey);
                 void this.persistTabs();
@@ -4396,13 +4431,68 @@ export class AcpManager {
         });
     }
 
-    async listState() {
-        await this.ensureConfigsLoaded();
+    #serializeAgentStateTab(tabId, entry) {
+        if (!entry) return null;
+        const serialized = entry.serialize();
+        if (!serialized) return null;
         return {
+            ...serialized,
+            revision: this.tabRevisions.get(tabId) || 0
+        };
+    }
+
+    async listState(options = {}) {
+        await this.ensureConfigsLoaded();
+        const full = options.full === true || !Number.isFinite(options.since);
+        if (!full) {
+            const since = Math.max(0, options.since);
+            const tabs = [];
+            for (const [tabId, entry] of this.tabs.entries()) {
+                const revision = this.tabRevisions.get(tabId) || 0;
+                if (revision <= since) continue;
+                const serialized = this.#serializeAgentStateTab(tabId, entry);
+                if (serialized) {
+                    tabs.push(serialized);
+                }
+            }
+            const removedTabs = [];
+            for (const [tabId, revision] of this.deletedTabRevisions.entries()) {
+                if (revision > since) {
+                    removedTabs.push({
+                        id: tabId,
+                        revision
+                    });
+                }
+            }
+            const definitionsChanged = this.definitionsRevision > since;
+            const definitions = definitionsChanged
+                ? await this.listDefinitions()
+                : undefined;
+            const configs = definitionsChanged
+                ? await this.listAgentConfigs()
+                : undefined;
+            return {
+                full: false,
+                revision: this.stateRevision,
+                restoring: this.restoring,
+                definitions,
+                configs,
+                tabs,
+                removedTabs
+            };
+        }
+
+        const definitions = await this.listDefinitions();
+        const configs = await this.listAgentConfigs();
+        return {
+            full: true,
+            revision: this.stateRevision,
             restoring: this.restoring,
-            definitions: await this.listDefinitions(),
-            configs: await this.listAgentConfigs(),
-            tabs: this.#getSerializedTabs()
+            definitions,
+            configs,
+            tabs: Array.from(this.tabs.entries())
+                .map(([tabId, entry]) => this.#serializeAgentStateTab(tabId, entry))
+                .filter(Boolean)
         };
     }
 
@@ -4430,6 +4520,13 @@ export class AcpManager {
                     sessionCapabilities: serialized.sessionCapabilities
                 };
             })
+        };
+    }
+
+    listHeartbeatInventory() {
+        return {
+            restoring: this.restoring,
+            tabs: Array.from(this.tabs.keys())
         };
     }
 
@@ -4476,6 +4573,7 @@ export class AcpManager {
                 }
             };
             this.tabs.set(tabId, tabEntry);
+            this.#markTabChanged(tabId);
             this.#clearDefinitionAvailabilityOverride(definition.id);
             await this.persistTabs();
             return tabEntry.serialize();
@@ -4706,6 +4804,7 @@ export class AcpManager {
                     tabEntry.runtime,
                     rawSerialized
                 );
+                this.#markTabChanged(targetTabId);
                 this.#clearDefinitionAvailabilityOverride(definition.id);
                 await this.persistTabs();
                 return serialized;
@@ -4749,6 +4848,7 @@ export class AcpManager {
                 }
             };
             this.tabs.set(tabId, tabEntry);
+            this.#markTabChanged(tabId);
             this.#clearDefinitionAvailabilityOverride(definition.id);
             await this.persistTabs();
             return tabEntry.serialize();
@@ -4833,6 +4933,7 @@ export class AcpManager {
                         );
                     }
                 });
+                this.#markTabChanged(meta.id);
                 this.#clearDefinitionAvailabilityOverride(definition.id);
             } catch (error) {
                 changed = true;
@@ -4902,6 +5003,7 @@ export class AcpManager {
         if (!tabEntry) return;
         await tabEntry.runtime.closeTab(tabId);
         this.tabs.delete(tabId);
+        this.#markTabDeleted(tabId);
         await this.persistTabs();
         tabEntry.runtime.scheduleIdleShutdown(async () => {
             if (

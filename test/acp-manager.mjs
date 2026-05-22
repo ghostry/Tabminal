@@ -1598,6 +1598,55 @@ describe('AcpManager', () => {
         assert.equal(state.restoring, true);
     });
 
+    it('returns only agent tab ids in heartbeat inventory', async () => {
+        const { manager } = createManager();
+        manager.restoring = true;
+        const tab = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-1'
+        });
+
+        const inventory = manager.listHeartbeatInventory();
+
+        assert.deepEqual(inventory, {
+            restoring: true,
+            tabs: [tab.id]
+        });
+    });
+
+    it('returns incremental agent state after a known revision', async () => {
+        const { manager } = createManager();
+        const first = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-1'
+        });
+        const baseline = await manager.listState({ full: true });
+        const second = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-2'
+        });
+
+        const delta = await manager.listState({ since: baseline.revision });
+
+        assert.equal(delta.full, false);
+        assert.deepEqual(delta.tabs.map((tab) => tab.id), [second.id]);
+        assert.deepEqual(delta.removedTabs, []);
+
+        await manager.closeTab(first.id);
+        const removalDelta = await manager.listState({
+            since: delta.revision
+        });
+
+        assert.deepEqual(removalDelta.tabs, []);
+        assert.deepEqual(
+            removalDelta.removedTabs.map((entry) => entry.id),
+            [first.id]
+        );
+    });
+
     it('creates tabs with an initial mode when requested', async () => {
         const { manager } = createManager();
         const tab = await manager.createTab({

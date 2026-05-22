@@ -957,6 +957,7 @@ class ServerClient {
         this.pendingImmediateSync = false;
         this.immediateSyncTimer = null;
         this.agentStateLoaded = false;
+        this.agentStateRevision = 0;
         this.needsAccessLogin = false;
         this.accessLoginUrl = '';
         this.expandedPaths = new Set();
@@ -1102,6 +1103,7 @@ class ServerClient {
         this.needsAccessLogin = false;
         this.accessLoginUrl = '';
         renderServerControls();
+        await fetchServerSystemInfo(this);
         await syncServer(this);
         this.startHeartbeat();
     }
@@ -15369,62 +15371,45 @@ function shouldApplyAuthoritativeAgentSnapshot(existing, data) {
         !== buildComparableAgentTimelineTail(existing);
 }
 
-function upsertAgentInventoryTab(server, data) {
-    const key = makeAgentTabKey(server.id, data.id);
-    const existing = state.agentTabs.get(key);
-    if (existing) {
-        const changed = existing.applyInventory(data);
-        existing.connect();
-        return {
-            agentTab: existing,
-            changed
-        };
-    }
-    const agentTab = new AgentTab(data, server);
-    state.agentTabs.set(key, agentTab);
-    return {
-        agentTab,
-        changed: true
-    };
+function normalizeHeartbeatAgentTabIds(agents) {
+    const tabs = Array.isArray(agents?.tabs) ? agents.tabs : [];
+    return tabs
+        .map((entry) => {
+            if (typeof entry === 'string') return entry;
+            if (entry && typeof entry.id === 'string') return entry.id;
+            return '';
+        })
+        .map((id) => id.trim())
+        .filter(Boolean);
 }
 
-function reconcileAgentInventory(server, inventory) {
-    if (!server || !inventory || typeof inventory !== 'object') {
+async function reconcileAgentHeartbeat(server, agents) {
+    if (!server || !agents || typeof agents !== 'object') {
         return;
     }
-    const restoring = !!inventory.restoring;
-    const seenKeys = new Set();
-    const touchedSessions = new Set();
+    const tabIds = normalizeHeartbeatAgentTabIds(agents);
+    const seenKeys = new Set(tabIds.map((id) => makeAgentTabKey(server.id, id)));
+    let needsFullSync = !!agents.restoring && !server.agentStateLoaded;
 
-    for (const tabData of Array.isArray(inventory.tabs) ? inventory.tabs : []) {
-        const { agentTab, changed } = upsertAgentInventoryTab(server, tabData);
-        seenKeys.add(agentTab.key);
-        if (!changed) {
-            continue;
-        }
-        const session = agentTab.getLinkedSession();
-        if (session) {
-            touchedSessions.add(session.key);
+    for (const key of seenKeys) {
+        if (!state.agentTabs.has(key)) {
+            needsFullSync = true;
+            break;
         }
     }
 
-    if (!restoring) {
+    if (!agents.restoring) {
         for (const agentTab of getAgentTabsForServer(server.id)) {
             if (seenKeys.has(agentTab.key)) continue;
-            const session = agentTab.getLinkedSession();
-            if (session) {
-                touchedSessions.add(session.key);
-            }
             removeAgentTab(agentTab.key);
         }
     }
 
-    for (const sessionKey of touchedSessions) {
-        const session = state.sessions.get(sessionKey);
-        if (!session) continue;
-        session.updateTabUI();
-        if (state.activeSessionKey === session.key) {
-            refreshWorkspaceIfSessionActive(session);
+    if (needsFullSync) {
+        try {
+            await syncAgentsForServer(server, { force: true });
+        } catch (error) {
+            console.warn('Failed to load agent details from heartbeat index:', error);
         }
     }
 }
@@ -15516,15 +15501,24 @@ async function syncAgentsForServer(server, { force = false } = {}) {
     if (!server || !server.isAuthenticated) return;
     if (!force && server.agentStateLoaded) return;
 
-    const response = await server.fetch('/api/agents');
+    const params = new URLSearchParams();
+    const wantsFull = !server.agentStateLoaded;
+    if (wantsFull) {
+        params.set('full', '1');
+    } else {
+        params.set('since', String(server.agentStateRevision));
+    }
+    const requestPath = `/api/agents?${params.toString()}`;
+    const response = await server.fetch(requestPath);
     if (!response.ok) {
         throw new Error(`Failed to load agents: HTTP ${response.status}`);
     }
     const data = await response.json();
-    state.agentDefinitions.set(
-        server.id,
-        Array.isArray(data?.definitions) ? data.definitions : []
-    );
+    if (Array.isArray(data?.definitions)) {
+        state.agentDefinitions.set(server.id, data.definitions);
+    } else if (data?.full) {
+        state.agentDefinitions.set(server.id, []);
+    }
     const restoring = !!data?.restoring;
 
     const seenKeys = new Set();
@@ -15534,13 +15528,27 @@ async function syncAgentsForServer(server, { force = false } = {}) {
         upsertAgentTab(server, tabData);
     }
 
-    if (!restoring) {
+    for (const removed of Array.isArray(data?.removedTabs)
+        ? data.removedTabs
+        : []) {
+        const removedId = typeof removed === 'string' ? removed : removed?.id;
+        if (!removedId) continue;
+        removeAgentTab(makeAgentTabKey(server.id, removedId));
+    }
+
+    if (!restoring && data?.full) {
         for (const agentTab of getAgentTabsForServer(server.id)) {
             if (seenKeys.has(agentTab.key)) continue;
             removeAgentTab(agentTab.key);
         }
     }
 
+    if (Number.isFinite(data?.revision)) {
+        server.agentStateRevision = Math.max(
+            server.agentStateRevision || 0,
+            data.revision
+        );
+    }
     server.agentStateLoaded = !restoring;
     if (restoring) {
         return;
@@ -15770,6 +15778,7 @@ function resetServerEndpoint(server, normalizedUrl) {
     server.modelStore.clear();
     server.expandedPaths.clear();
     server.agentStateLoaded = false;
+    server.agentStateRevision = 0;
     server.lastSystemData = null;
     server.lastLatency = 0;
     server.needsAccessLogin = false;
@@ -15897,6 +15906,44 @@ async function fetchExpandedPaths(server) {
         }
     } catch (error) {
         console.error(error);
+    }
+}
+
+function mergeSystemData(previous, update) {
+    if (!update || typeof update !== 'object') {
+        return previous || null;
+    }
+    const base = previous && typeof previous === 'object' ? previous : {};
+    return {
+        ...base,
+        ...update,
+        cpu: {
+            ...(base.cpu || {}),
+            ...(update.cpu || {})
+        },
+        memory: {
+            ...(base.memory || {}),
+            ...(update.memory || {})
+        }
+    };
+}
+
+async function fetchServerSystemInfo(server) {
+    if (!server || !server.isAuthenticated) return null;
+    try {
+        const res = await server.fetch('/api/system');
+        if (!res.ok) return null;
+        const payload = await res.json();
+        const system = payload?.system || payload;
+        server.lastSystemData = mergeSystemData(server.lastSystemData, system);
+        if (getActiveServer()?.id === server.id && server.lastSystemData) {
+            updateSystemStatus(server.lastSystemData, server.lastLatency, server);
+        }
+        renderServerControls();
+        return server.lastSystemData;
+    } catch (error) {
+        console.warn('Failed to load host system info:', error);
+        return null;
     }
 }
 
@@ -16032,12 +16079,15 @@ async function syncServer(server) {
             server.accessLoginUrl = '';
             setStatus(server, 'connected');
             if (data.system) {
-                server.lastSystemData = data.system;
+                server.lastSystemData = mergeSystemData(
+                    server.lastSystemData,
+                    data.system
+                );
                 server.lastLatency = latency;
                 pushServerHeartbeat(server, latency);
                 updateServerControlMetric(server);
                 if (getActiveServer()?.id === server.id) {
-                    updateSystemStatus(data.system, latency, server);
+                    updateSystemStatus(server.lastSystemData, latency, server);
                 }
             } else {
                 pushServerHeartbeat(server, latency);
@@ -16046,7 +16096,7 @@ async function syncServer(server) {
 
             const sessions = Array.isArray(data) ? data : data.sessions;
             reconcileSessions(server, sessions || []);
-            reconcileAgentInventory(server, data.agents);
+            await reconcileAgentHeartbeat(server, data.agents);
             await editorManager.applyFileWriteResults(
                 server,
                 Array.isArray(data?.fileWriteResults)
@@ -16455,7 +16505,8 @@ function updateSystemStatus(system, latency, server = getActiveServer()) {
     if (!textGroup) return; // Should exist in HTML now
 
     if (server && system) {
-        server.lastSystemData = system;
+        server.lastSystemData = mergeSystemData(server.lastSystemData, system);
+        system = server.lastSystemData;
     }
     if (latency !== null && latency !== undefined) {
         // Initialize history with random data on first real packet to avoid empty graph
@@ -16501,7 +16552,9 @@ function updateSystemStatus(system, latency, server = getActiveServer()) {
         `;
     };
 
-    const memPercent = (data.memory.used / data.memory.total) * 100;
+    const memUsed = Number(data.memory?.used) || 0;
+    const memTotal = Number(data.memory?.total) || 0;
+    const memPercent = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
 
     const formatUptime = (seconds) => {
         const d = Math.floor(seconds / (3600 * 24));
@@ -16525,12 +16578,12 @@ function updateSystemStatus(system, latency, server = getActiveServer()) {
 
     const items = [
         { label: 'Host', value: displayHost },
-        { label: 'Kernel', value: data.osName },
-        { label: 'IP', value: data.ip },
-        { label: 'CPU', value: `${data.cpu.count}x ${data.cpu.speed} ${data.cpu.usagePercent}% ${renderProgressBar(data.cpu.usagePercent)}` },
-        { label: 'Mem', value: `${formatBytesPair(data.memory.used, data.memory.total)} ${memPercent.toFixed(0)}% ${renderProgressBar(memPercent)}` },
-        { label: 'Up', value: formatUptime(data.uptime) },
-        { label: 'Tabminal', value: `${sessionCount}> ${formatUptime(data.processUptime)}` },
+        { label: 'Kernel', value: data.osName || 'N/A' },
+        { label: 'IP', value: data.ip || 'N/A' },
+        { label: 'CPU', value: `${data.cpu?.count || '?'}x ${data.cpu?.speed || 'N/A'} ${data.cpu?.usagePercent || '0.0'}% ${renderProgressBar(data.cpu?.usagePercent || 0)}` },
+        { label: 'Mem', value: `${formatBytesPair(memUsed, memTotal)} ${memPercent.toFixed(0)}% ${renderProgressBar(memPercent)}` },
+        { label: 'Up', value: formatUptime(data.uptime || 0) },
+        { label: 'Tabminal', value: `${sessionCount}> ${formatUptime(data.processUptime || 0)}` },
         { label: 'FPS', value: currentFps },
         { label: 'Heartbeat', value: heartbeatValue }
     ];
@@ -18230,6 +18283,7 @@ async function initApp() {
         await server.bootstrapAuth();
         if (!server.isAuthenticated) continue;
         await fetchExpandedPaths(server);
+        await fetchServerSystemInfo(server);
         await syncServer(server);
         server.startHeartbeat();
     }

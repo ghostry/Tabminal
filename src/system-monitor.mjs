@@ -4,10 +4,15 @@ import process from 'node:process';
 export class SystemMonitor {
     constructor(intervalMs = 10000) {
         this.intervalMs = intervalMs;
+        this.staticInfo = this.readStaticInfo();
         this.cachedStats = null;
         this.lastUpdate = 0;
         this.prevCpus = os.cpus();
         this.updateStats(); // Initial update
+    }
+
+    getStaticInfo() {
+        return this.staticInfo;
     }
 
     getStats() {
@@ -23,10 +28,39 @@ export class SystemMonitor {
         return this.cachedStats;
     }
 
+    readStaticInfo() {
+        const cpus = os.cpus();
+        const totalMem = os.totalmem();
+
+        const nets = os.networkInterfaces();
+        let ip = 'Unknown';
+        // Find first non-internal IPv4
+        for (const name of Object.keys(nets)) {
+            for (const net of nets[name]) {
+                if (net.family === 'IPv4' && !net.internal) {
+                    ip = net.address;
+                    break;
+                }
+            }
+            if (ip !== 'Unknown') break;
+        }
+
+        return {
+            hostname: os.hostname(),
+            osName: `${os.type()} ${os.release()}`, // e.g. Darwin 21.6.0
+            ip,
+            cpu: {
+                model: cpus[0]?.model || 'Unknown CPU',
+                count: cpus.length
+            },
+            memory: {
+                total: totalMem
+            }
+        };
+    }
+
     updateStats() {
         const cpus = os.cpus();
-        const cpuModel = cpus[0]?.model || 'Unknown CPU';
-        const cpuCount = cpus.length;
         
         // Calculate CPU usage percentage
         let totalIdle = 0;
@@ -65,19 +99,6 @@ export class SystemMonitor {
         const freeMem = os.freemem();
         const usedMem = totalMem - freeMem;
 
-        const nets = os.networkInterfaces();
-        let ip = 'Unknown';
-        // Find first non-internal IPv4
-        for (const name of Object.keys(nets)) {
-            for (const net of nets[name]) {
-                if (net.family === 'IPv4' && !net.internal) {
-                    ip = net.address;
-                    break;
-                }
-            }
-            if (ip !== 'Unknown') break;
-        }
-
         const speeds = cpus.map(c => c.speed);
         const minSpeed = Math.min(...speeds);
         const maxSpeed = Math.max(...speeds);
@@ -86,17 +107,11 @@ export class SystemMonitor {
             : `${(minSpeed / 1000).toFixed(1)}GHz-${(maxSpeed / 1000).toFixed(1)}GHz`;
 
         this.cachedStats = {
-            hostname: os.hostname(),
-            osName: `${os.type()} ${os.release()}`, // e.g. Darwin 21.6.0
-            ip: ip,
             cpu: {
-                model: cpuModel,
-                count: cpuCount,
                 speed: speedStr,
                 usagePercent: usagePercent.toFixed(1)
             },
             memory: {
-                total: totalMem,
                 free: freeMem,
                 used: usedMem
             },
