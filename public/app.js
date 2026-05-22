@@ -4286,7 +4286,7 @@ class EditorManager {
                 }
             );
             if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
+                await throwResponseError(response, 'Failed to reset file');
             }
             this.requestSessionTreeRefresh(session);
             session.fileTreeElement?.focus({ preventScroll: true });
@@ -4927,7 +4927,18 @@ class EditorManager {
             }
         name.style.display = isEditing ? 'none' : '';
 
-        const isResettable = file.gitStatus && file.gitStatus[1] === 'M' && !file.isDirectory;
+        const indexStatus = file.gitStatus?.[0] || ' ';
+        const worktreeStatus = file.gitStatus?.[1] || ' ';
+        const isResettable = !file.isDirectory
+            && typeof file.gitStatus === 'string'
+            && file.gitStatus !== '??'
+            && indexStatus !== '?'
+            && worktreeStatus !== '?'
+            && indexStatus !== 'A'
+            && (indexStatus === 'M'
+                || indexStatus === 'D'
+                || worktreeStatus === 'M'
+                || worktreeStatus === 'D');
         resetButton.style.display = isEditing ? 'none' : '';
         resetButton.hidden = !isResettable;
         resetButton.disabled = !isResettable;

@@ -316,6 +316,35 @@ async function getGitStatusMap(dirPath) {
     }
 }
 
+export async function resetGitTrackedFile(baseDir, targetPath) {
+    const absPath = path.resolve(baseDir, targetPath);
+    const revParse = await execFileAsync(
+        'git',
+        ['rev-parse', '--show-toplevel'],
+        {
+            cwd: path.dirname(absPath),
+            timeout: 5000
+        }
+    );
+    const repoRoot = revParse.stdout.trim();
+    const relPath = path.relative(repoRoot, absPath);
+
+    await execFileAsync(
+        'git',
+        ['checkout', 'HEAD', '--', relPath],
+        {
+            cwd: repoRoot,
+            timeout: 5000
+        }
+    );
+
+    return {
+        path: targetPath,
+        repoRoot,
+        repoPath: relPath
+    };
+}
+
 function lookupStatusForPath(statusMap, repoRoot, baseDir, dirPath, entryPath) {
     // Convert entryPath (relative to baseDir) to a path relative to repo root
     const fullPath = path.resolve(baseDir, dirPath, entryPath);
@@ -559,32 +588,13 @@ export const setupFsRoutes = (router) => {
         }
 
         try {
-            // Check if this is a git repository
-            try {
-                await execFileAsync('git', ['rev-parse', '--is-inside-work-tree'], {
-                    cwd: baseDir,
-                    timeout: 2000
-                });
-            } catch {
-                ctx.status = 400;
-                ctx.body = { error: 'Not a git repository' };
-                return;
-            }
-
-            // Execute git checkout -- for the specific file
-            await execFileAsync('git', ['checkout', '--', targetPath], {
-                cwd: baseDir,
-                timeout: 5000
-            });
-
-            ctx.body = {
-                path: targetPath,
-                success: true
-            };
+            const resetResult = await resetGitTrackedFile(baseDir, targetPath);
+            ctx.body = { ...resetResult, success: true };
         } catch (err) {
             console.error('FS Git Reset Error:', err);
+            const msg = (err.stderr || err.stdout || err.message || '').trim();
             ctx.status = 500;
-            ctx.body = { error: err.message };
+            ctx.body = { error: msg || 'git reset failed' };
         }
     });
 

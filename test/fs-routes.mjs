@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
+import util from 'node:util';
 
 import {
     buildTextFileVersion,
@@ -10,8 +12,11 @@ import {
     ensureRenameTargetAvailable,
     isSupportedTextBuffer,
     readTextFileSnapshot,
+    resetGitTrackedFile,
     writeTextFileSnapshot
 } from '../src/fs-routes.mjs';
+
+const execFileAsync = util.promisify(execFile);
 
 describe('FS read text detection', () => {
     it('accepts utf-8 text content', () => {
@@ -183,6 +188,61 @@ describe('FS text snapshot versioning', () => {
                     && error?.snapshot?.content === 'remote\n'
                 )
             );
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('FS git reset', () => {
+    it('resets staged tracked changes from a nested repo path', async () => {
+        const tempDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'tabminal-fs-routes-')
+        );
+        try {
+            const repoDir = path.join(tempDir, 'repo');
+            const subDir = path.join(repoDir, 'sub');
+            const filePath = path.join(subDir, 'sample.txt');
+            await fs.mkdir(subDir, { recursive: true });
+
+            await execFileAsync('git', ['init'], { cwd: repoDir });
+            await execFileAsync(
+                'git',
+                ['config', 'user.email', 'tabminal@example.invalid'],
+                { cwd: repoDir }
+            );
+            await execFileAsync(
+                'git',
+                ['config', 'user.name', 'Tabminal Test'],
+                { cwd: repoDir }
+            );
+            await fs.writeFile(filePath, 'before\n', 'utf8');
+            await execFileAsync('git', ['add', 'sub/sample.txt'], {
+                cwd: repoDir
+            });
+            await execFileAsync('git', ['commit', '-m', 'init'], {
+                cwd: repoDir
+            });
+
+            await fs.writeFile(filePath, 'after\n', 'utf8');
+            await execFileAsync('git', ['add', 'sub/sample.txt'], {
+                cwd: repoDir
+            });
+
+            const resetResult = await resetGitTrackedFile(
+                tempDir,
+                'repo/sub/sample.txt'
+            );
+
+            assert.equal(resetResult.repoPath, 'sub/sample.txt');
+            assert.equal(await fs.readFile(filePath, 'utf8'), 'before\n');
+
+            const status = await execFileAsync(
+                'git',
+                ['status', '--porcelain'],
+                { cwd: repoDir }
+            );
+            assert.equal(status.stdout, '');
         } finally {
             await fs.rm(tempDir, { recursive: true, force: true });
         }
