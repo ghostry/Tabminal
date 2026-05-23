@@ -13,6 +13,154 @@ import * as persistence from './persistence.mjs';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
+const CLIENT_TIMELINE_INITIAL_LIMIT = 30;
+
+function compactTerminalSummary(summary = {}) {
+    const next = cloneSerializable(summary, {}) || {};
+    const output = typeof next.output === 'string' ? next.output : '';
+    delete next.output;
+    next.outputLength = output.length;
+    return next;
+}
+
+function compactToolContentItem(item = {}) {
+    if (!item || typeof item !== 'object') return item;
+    if (item.type === 'terminal' && item.terminalId) {
+        return {
+            type: 'terminal',
+            terminalId: item.terminalId
+        };
+    }
+    if (item.type === 'diff' && item.path) {
+        return {
+            type: 'diff',
+            path: item.path
+        };
+    }
+    if (item.type === 'content') {
+        const resourceUri = item.content?.resource?.uri || '';
+        return {
+            type: 'content',
+            content: {
+                type: item.content?.type || 'content',
+                ...(resourceUri ? { resource: { uri: resourceUri } } : {})
+            }
+        };
+    }
+    return cloneSerializable(item, {});
+}
+
+function compactToolCall(toolCall = {}) {
+    const next = cloneSerializable(toolCall, {}) || {};
+    delete next.rawOutput;
+    next.content = Array.isArray(next.content)
+        ? next.content.map((item) => compactToolContentItem(item))
+        : [];
+    next.detailsAvailable = true;
+    return next;
+}
+
+function compactPermission(permission = {}) {
+    const next = cloneSerializable(permission, {}) || {};
+    if (next.toolCall) {
+        next.toolCall = compactToolCall(next.toolCall);
+    }
+    next.detailsAvailable = true;
+    return next;
+}
+
+function buildSessionUpdateTabPatch(tab, update = {}) {
+    switch (update?.sessionUpdate) {
+        case 'current_mode_update':
+            return {
+                currentModeId: tab.currentModeId,
+                availableModes: tab.availableModes
+            };
+        case 'available_commands_update':
+            return { availableCommands: tab.availableCommands };
+        case 'config_option_update':
+            return { configOptions: tab.configOptions };
+        case 'session_info_update':
+            return { title: tab.title };
+        default:
+            return null;
+    }
+}
+
+function getSerializedTabTimeline(serialized = {}) {
+    const entries = [];
+    for (const message of Array.isArray(serialized.messages)
+        ? serialized.messages
+        : []) {
+        entries.push({ type: 'message', value: message });
+    }
+    for (const toolCall of Array.isArray(serialized.toolCalls)
+        ? serialized.toolCalls
+        : []) {
+        entries.push({ type: 'tool', value: toolCall });
+    }
+    for (const permission of Array.isArray(serialized.permissions)
+        ? serialized.permissions
+        : []) {
+        entries.push({ type: 'permission', value: permission });
+    }
+    for (const plan of Array.isArray(serialized.plan) ? serialized.plan : []) {
+        entries.push({ type: 'plan', value: plan });
+    }
+    return entries.sort((left, right) =>
+        compareTimelineOrder(left.value, right.value)
+    );
+}
+
+function sliceSerializedTabTimeline(serialized = {}, options = {}) {
+    const compact = options.compact !== false;
+    const timeline = getSerializedTabTimeline(serialized);
+    const total = timeline.length;
+    const rawBefore = Number.parseInt(String(options.before ?? total), 10);
+    const before = Number.isFinite(rawBefore)
+        ? Math.max(0, Math.min(total, rawBefore))
+        : total;
+    const rawLimit = Number.parseInt(
+        String(options.limit ?? CLIENT_TIMELINE_INITIAL_LIMIT),
+        10
+    );
+    const limit = Math.max(
+        1,
+        Math.min(200, Number.isFinite(rawLimit) && rawLimit > 0
+            ? rawLimit
+            : CLIENT_TIMELINE_INITIAL_LIMIT)
+    );
+    const start = Math.max(0, before - limit);
+    const selected = timeline.slice(start, before);
+    const next = {
+        ...serialized,
+        messages: [],
+        toolCalls: [],
+        permissions: [],
+        plan: [],
+        terminals: compact
+            ? (Array.isArray(serialized.terminals)
+                ? serialized.terminals.map((item) => compactTerminalSummary(item))
+                : [])
+            : (Array.isArray(serialized.terminals) ? serialized.terminals : []),
+        timelineWindow: {
+            start,
+            end: before,
+            total,
+            hasMoreBefore: start > 0
+        }
+    };
+    for (const entry of selected) {
+        if (entry.type === 'message') next.messages.push(entry.value);
+        else if (entry.type === 'tool') {
+            next.toolCalls.push(compact ? compactToolCall(entry.value) : entry.value);
+        } else if (entry.type === 'permission') {
+            next.permissions.push(compact ? compactPermission(entry.value) : entry.value);
+        }
+        else if (entry.type === 'plan') next.plan.push(entry.value);
+    }
+    return next;
+}
 const DEFAULT_AVAILABILITY_OVERRIDE_TTL_MS = 30 * 1000;
 const DEFAULT_PROBE_CACHE_TTL_MS = 15 * 1000;
 const DEFAULT_TRANSCRIPT_PERSIST_DELAY_MS = 250;
@@ -151,6 +299,16 @@ function normalizeListedSessionInfo(session) {
         title: typeof normalized.title === 'string' ? normalized.title : '',
         updatedAt: typeof normalized.updatedAt === 'string'
             ? normalized.updatedAt
+            : ''
+    };
+}
+
+function compactListedSessionInfo(session) {
+    const normalized = normalizeListedSessionInfo(session);
+    return {
+        ...normalized,
+        relativeUpdatedAt: typeof session?.relativeUpdatedAt === 'string'
+            ? session.relativeUpdatedAt
             : ''
     };
 }
@@ -2632,9 +2790,9 @@ class AcpRuntime extends EventEmitter {
             await this.#loadSessionIntoTab(tab, meta);
             this.#broadcast(tab, {
                 type: 'snapshot',
-                tab: this.serializeTab(tab)
+                tab: this.serializeTabWindow(tab)
             });
-            return this.serializeTab(tab);
+            return this.serializeTabWindow(tab);
         } catch (error) {
             tab.restoreCapture = null;
             this.tabs.delete(tab.id);
@@ -2725,7 +2883,7 @@ class AcpRuntime extends EventEmitter {
 
         try {
             await this.#loadSessionIntoTab(tab, meta);
-            return this.serializeTab(tab);
+            return this.serializeTabWindow(tab);
         } catch (error) {
             this.tabs.delete(tab.id);
             this.sessionToTabId.delete(tab.acpSessionId);
@@ -2813,23 +2971,23 @@ class AcpRuntime extends EventEmitter {
         this.sessionToTabId.set(tab.acpSessionId, tab.id);
         this.#broadcast(tab, {
             type: 'snapshot',
-            tab: this.serializeTab(tab)
+            tab: this.serializeTabWindow(tab)
         });
 
         try {
             await this.#loadSessionIntoTab(tab, meta);
             this.#broadcast(tab, {
                 type: 'snapshot',
-                tab: this.serializeTab(tab)
+                tab: this.serializeTabWindow(tab)
             });
-            return this.serializeTab(tab);
+            return this.serializeTabWindow(tab);
         } catch (error) {
             this.sessionToTabId.delete(tab.acpSessionId);
             this.#restoreSerializedTab(tab, previousSnapshot);
             this.sessionToTabId.set(tab.acpSessionId, tab.id);
             this.#broadcast(tab, {
                 type: 'snapshot',
-                tab: this.serializeTab(tab)
+                tab: this.serializeTabWindow(tab)
             });
             throw error;
         }
@@ -2939,6 +3097,40 @@ class AcpRuntime extends EventEmitter {
         };
     }
 
+    serializeTabWindow(tab, options = {}) {
+        return sliceSerializedTabTimeline(this.serializeTab(tab), options);
+    }
+
+    serializeToolDetail(tab, toolCallId) {
+        const serialized = this.serializeTab(tab);
+        const toolCall = serialized.toolCalls.find(
+            (entry) => entry.toolCallId === toolCallId
+        );
+        if (!toolCall) return null;
+        const terminalIds = new Set(getToolCallTerminalIds(toolCall));
+        return {
+            toolCall,
+            terminals: serialized.terminals.filter((terminal) =>
+                terminalIds.has(terminal.terminalId)
+            )
+        };
+    }
+
+    serializePermissionDetail(tab, permissionId) {
+        const serialized = this.serializeTab(tab);
+        const permission = serialized.permissions.find(
+            (entry) => entry.id === permissionId
+        );
+        if (!permission) return null;
+        const terminalIds = new Set(getToolCallTerminalIds(permission.toolCall));
+        return {
+            permission,
+            terminals: serialized.terminals.filter((terminal) =>
+                terminalIds.has(terminal.terminalId)
+            )
+        };
+    }
+
     #getPromptCapabilities() {
         return this.agentCapabilities?.promptCapabilities || {};
     }
@@ -3024,7 +3216,7 @@ class AcpRuntime extends EventEmitter {
         tab.clients.add(socket);
         socket.send(JSON.stringify({
             type: 'snapshot',
-            tab: this.serializeTab(tab)
+            tab: this.serializeTabWindow(tab)
         }));
         socket.on('close', () => {
             tab.clients.delete(socket);
@@ -3215,15 +3407,19 @@ class AcpRuntime extends EventEmitter {
                 currentModeId: tab.currentModeId
             },
             tab: {
-                title: tab.title,
                 currentModeId: tab.currentModeId,
-                availableModes: tab.availableModes,
-                availableCommands: tab.availableCommands,
-                configOptions: tab.configOptions
+                availableModes: tab.availableModes
             }
         });
         this.#markTabDirty(tab);
-        return this.serializeTab(tab);
+        return {
+            id: tab.id,
+            title: tab.title,
+            currentModeId: tab.currentModeId,
+            availableModes: tab.availableModes,
+            availableCommands: tab.availableCommands,
+            configOptions: tab.configOptions
+        };
     }
 
     async setConfigOption(tabId, configId, valueId) {
@@ -3278,15 +3474,18 @@ class AcpRuntime extends EventEmitter {
                 configOptions: tab.configOptions
             },
             tab: {
-                title: tab.title,
-                currentModeId: tab.currentModeId,
-                availableModes: tab.availableModes,
-                availableCommands: tab.availableCommands,
                 configOptions: tab.configOptions
             }
         });
         this.#markTabDirty(tab);
-        return this.serializeTab(tab);
+        return {
+            id: tab.id,
+            title: tab.title,
+            currentModeId: tab.currentModeId,
+            availableModes: tab.availableModes,
+            availableCommands: tab.availableCommands,
+            configOptions: tab.configOptions
+        };
     }
 
     async closeTab(tabId) {
@@ -3400,7 +3599,7 @@ class AcpRuntime extends EventEmitter {
                     }
                 );
                 tab.toolCalls.set(update.toolCallId, nextToolCall);
-                broadcastUpdate = nextToolCall;
+                broadcastUpdate = compactToolCall(nextToolCall);
                 didChange = true;
                 break;
             }
@@ -3420,7 +3619,7 @@ class AcpRuntime extends EventEmitter {
                     }
                 );
                 tab.toolCalls.set(update.toolCallId, nextToolCall);
-                broadcastUpdate = nextToolCall;
+                broadcastUpdate = compactToolCall(nextToolCall);
                 didChange = true;
                 break;
             }
@@ -3463,16 +3662,11 @@ class AcpRuntime extends EventEmitter {
         }
 
         if (!suppressSessionUpdateBroadcast) {
+            const tabPatch = buildSessionUpdateTabPatch(tab, broadcastUpdate);
             this.#broadcast(tab, {
                 type: 'session_update',
                 update: broadcastUpdate,
-                tab: {
-                    title: tab.title,
-                    currentModeId: tab.currentModeId,
-                    availableModes: tab.availableModes,
-                    availableCommands: tab.availableCommands,
-                    configOptions: tab.configOptions
-                }
+                ...(tabPatch ? { tab: tabPatch } : {})
             });
         }
         if (didChange) {
@@ -3621,7 +3815,7 @@ class AcpRuntime extends EventEmitter {
 
         this.#broadcast(tab, {
             type: 'permission_request',
-            permission: {
+            permission: compactPermission({
                 id: request.id,
                 sessionId: request.sessionId,
                 toolCall: request.toolCall,
@@ -3630,7 +3824,7 @@ class AcpRuntime extends EventEmitter {
                 createdAt: request.createdAt,
                 order: request.order,
                 selectedOptionId: request.selectedOptionId
-            }
+            })
         });
         this.#markTabDirty(tab);
 
@@ -3710,13 +3904,6 @@ class AcpRuntime extends EventEmitter {
 
     #broadcastHydratedSessionMetadata(tab, changes) {
         if (!changes) return;
-        const tabMeta = {
-            title: tab.title,
-            currentModeId: tab.currentModeId,
-            availableModes: tab.availableModes,
-            availableCommands: tab.availableCommands,
-            configOptions: tab.configOptions
-        };
         if (changes.titleChanged) {
             this.#broadcast(tab, {
                 type: 'session_update',
@@ -3724,7 +3911,7 @@ class AcpRuntime extends EventEmitter {
                     sessionUpdate: 'session_info_update',
                     title: tab.title || null
                 },
-                tab: tabMeta
+                tab: { title: tab.title }
             });
         }
         if (changes.modeChanged || changes.modesChanged) {
@@ -3735,7 +3922,10 @@ class AcpRuntime extends EventEmitter {
                     currentModeId: tab.currentModeId || '',
                     availableModes: tab.availableModes
                 },
-                tab: tabMeta
+                tab: {
+                    currentModeId: tab.currentModeId,
+                    availableModes: tab.availableModes
+                }
             });
         }
         if (changes.commandsChanged) {
@@ -3745,7 +3935,7 @@ class AcpRuntime extends EventEmitter {
                     sessionUpdate: 'available_commands_update',
                     availableCommands: tab.availableCommands
                 },
-                tab: tabMeta
+                tab: { availableCommands: tab.availableCommands }
             });
         }
         if (changes.configChanged) {
@@ -3755,7 +3945,7 @@ class AcpRuntime extends EventEmitter {
                     sessionUpdate: 'config_option_update',
                     configOptions: tab.configOptions
                 },
-                tab: tabMeta
+                tab: { configOptions: tab.configOptions }
             });
         }
     }
@@ -3787,7 +3977,7 @@ class AcpRuntime extends EventEmitter {
                 });
                 this.#broadcast(tab, {
                     type: 'terminal_update',
-                    terminal: tab.terminals.get(terminal.id)
+                    terminal: compactTerminalSummary(tab.terminals.get(terminal.id))
                 });
             };
             syncSummary(terminal.currentSummary());
@@ -3863,20 +4053,22 @@ class AcpRuntime extends EventEmitter {
     #syncTerminalSummary(sessionId, terminal, overrides = {}) {
         const tab = this.#getTabBySession(sessionId || terminal.sessionId);
         if (!tab) return;
-        tab.terminals.set(terminal.id, {
+        const nextSummary = {
             ...terminal.currentSummary(),
             ...overrides,
             terminalId: terminal.id
-        });
+        };
+        tab.terminals.set(terminal.id, nextSummary);
         if (!tab.busy) {
             this.#settleStaleToolCalls(
                 tab,
                 tab.status === 'error' ? 'error' : 'completed'
             );
         }
+        const terminalUpdate = compactTerminalSummary(nextSummary);
         this.#broadcast(tab, {
             type: 'terminal_update',
-            terminal: tab.terminals.get(terminal.id)
+            terminal: terminalUpdate
         });
         this.#markTabDirty(tab);
     }
@@ -3911,17 +4103,10 @@ class AcpRuntime extends EventEmitter {
             tab.toolCalls.set(toolCallId, nextToolCall);
             this.#broadcast(tab, {
                 type: 'session_update',
-                update: {
+                update: compactToolCall({
                     sessionUpdate: 'tool_call_update',
                     ...nextToolCall
-                },
-                tab: {
-                    title: tab.title,
-                    currentModeId: tab.currentModeId,
-                    availableModes: tab.availableModes,
-                    availableCommands: tab.availableCommands,
-                    configOptions: tab.configOptions
-                }
+                })
             });
             didChange = true;
         }
@@ -4436,8 +4621,92 @@ export class AcpManager {
         const serialized = entry.serialize();
         if (!serialized) return null;
         return {
-            ...serialized,
+            ...sliceSerializedTabTimeline(serialized),
             revision: this.tabRevisions.get(tabId) || 0
+        };
+    }
+
+    getTabTimelineWindow(tabId, options = {}) {
+        const entry = this.tabs.get(tabId);
+        if (!entry) return null;
+        const serialized = entry.serialize();
+        if (!serialized) return null;
+        return sliceSerializedTabTimeline(serialized, options);
+    }
+
+    getTabToolDetail(tabId, toolCallId, options = {}) {
+        const entry = this.tabs.get(tabId);
+        if (!entry) return null;
+        const serialized = entry.serialize();
+        if (!serialized) return null;
+        const toolCall = (serialized.toolCalls || []).find(
+            (item) => item?.toolCallId === toolCallId
+        );
+        if (!toolCall) return null;
+        const include = String(options.include || 'all').trim().toLowerCase();
+        const wantsAll = !include || include === 'all' || include === 'details';
+        const includeSet = new Set(include.split(',').map((item) => item.trim()));
+        const nextToolCall = wantsAll ? toolCall : {
+            ...compactToolCall(toolCall),
+            content: Array.isArray(toolCall.content)
+                ? toolCall.content.filter((item) => (
+                    (includeSet.has('terminal') && item?.type === 'terminal')
+                    || (includeSet.has('diff') && item?.type === 'diff')
+                    || (includeSet.has('content') && item?.type === 'content')
+                ))
+                : [],
+            detailsAvailable: true
+        };
+        const terminalIds = new Set(getToolCallTerminalIds(toolCall));
+        const terminals = wantsAll || includeSet.has('terminal')
+            ? (serialized.terminals || []).filter((terminal) =>
+                terminalIds.has(terminal?.terminalId)
+            )
+            : [];
+        return {
+            toolCall: nextToolCall,
+            terminals,
+            complete: wantsAll
+        };
+    }
+
+    getTabPermissionDetail(tabId, permissionId, options = {}) {
+        const entry = this.tabs.get(tabId);
+        if (!entry) return null;
+        const serialized = entry.serialize();
+        if (!serialized) return null;
+        const permission = (serialized.permissions || []).find(
+            (item) => item?.id === permissionId
+        );
+        if (!permission) return null;
+        const terminalIds = new Set(getToolCallTerminalIds(permission.toolCall));
+        const include = String(options.include || 'all').trim().toLowerCase();
+        const wantsAll = !include || include === 'all' || include === 'details';
+        const includeSet = new Set(include.split(',').map((item) => item.trim()));
+        const fullToolCall = permission.toolCall || {};
+        const nextPermission = wantsAll ? permission : {
+            ...compactPermission(permission),
+            toolCall: {
+                ...compactToolCall(fullToolCall),
+                content: Array.isArray(fullToolCall.content)
+                    ? fullToolCall.content.filter((item) => (
+                        (includeSet.has('terminal') && item?.type === 'terminal')
+                        || (includeSet.has('diff') && item?.type === 'diff')
+                        || (includeSet.has('content') && item?.type === 'content')
+                    ))
+                    : [],
+                detailsAvailable: true
+            },
+            detailsAvailable: true
+        };
+        return {
+            permission: nextPermission,
+            terminals: wantsAll || includeSet.has('terminal')
+                ? (serialized.terminals || []).filter((terminal) =>
+                    terminalIds.has(terminal?.terminalId)
+                )
+                : [],
+            complete: wantsAll
         };
     }
 
@@ -4576,7 +4845,7 @@ export class AcpManager {
             this.#markTabChanged(tabId);
             this.#clearDefinitionAvailabilityOverride(definition.id);
             await this.persistTabs();
-            return tabEntry.serialize();
+            return sliceSerializedTabTimeline(tabEntry.serialize());
         } catch (error) {
             const shouldDisposeRuntime = createdRuntime
                 || runtimeEntry.runtime.tabs.size === 0;
@@ -4719,7 +4988,7 @@ export class AcpManager {
                 const sessionId = String(session?.sessionId || '').trim();
                 if (!sessionId || seen.has(sessionId)) continue;
                 seen.add(sessionId);
-                merged.push(session);
+                merged.push(compactListedSessionInfo(session));
                 if (merged.length >= mergedLimit) {
                     break;
                 }
@@ -4767,7 +5036,7 @@ export class AcpManager {
             options.sessionId
         );
         if (existingTab) {
-            return existingTab;
+            return sliceSerializedTabTimeline(existingTab);
         }
 
         const resumeKey = [
@@ -4807,7 +5076,7 @@ export class AcpManager {
                 this.#markTabChanged(targetTabId);
                 this.#clearDefinitionAvailabilityOverride(definition.id);
                 await this.persistTabs();
-                return serialized;
+                return sliceSerializedTabTimeline(serialized);
             })();
             this.pendingResumeTabs.set(resumeKey, resumePromise);
 
@@ -4851,7 +5120,7 @@ export class AcpManager {
             this.#markTabChanged(tabId);
             this.#clearDefinitionAvailabilityOverride(definition.id);
             await this.persistTabs();
-            return tabEntry.serialize();
+            return sliceSerializedTabTimeline(tabEntry.serialize());
         })();
         this.pendingResumeTabs.set(resumeKey, resumePromise);
 

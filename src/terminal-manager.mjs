@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import pty from 'node-pty';
-import { TerminalSession } from './terminal-session.mjs';
+import { TerminalSession, getClientEnvText } from './terminal-session.mjs';
 import * as persistence from './persistence.mjs';
 import { config } from './config.mjs';
 
@@ -567,7 +567,7 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
             initialCwd: s.initialCwd,
             title: s.title,
             cwd: s.cwd,
-            env: s.env,
+            env: getClientEnvText(s.env),
             cols: s.pty.cols,
             rows: s.pty.rows,
             closed: !!s.closed,

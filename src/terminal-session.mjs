@@ -12,6 +12,7 @@ const {
 } = await loadHeadlessXtermPackages();
 const WS_STATE_OPEN = 1;
 const DEFAULT_HISTORY_LIMIT = 512 * 1024; // chars
+const INITIAL_HISTORY_SCREEN_MULTIPLIER = 1;
 const OSC_SEQUENCE_REGEX =
     /\u001b\]1337;(ExitCode=(\d+);CommandB64=([a-zA-Z0-9+/=]+)|CommandStartB64=([a-zA-Z0-9+/=]+)|TabminalPrompt)\u0007/g;
 const EXTRA_PRIVATE_MODE_REGEX = /\u001b\[\?(1005|1006|1015)([hl])/g;
@@ -23,6 +24,7 @@ const TWO_CHAR_ESCAPE_REGEX = /\u001b[@-Z\\-_]/g;
 const CONTROL_CHAR_REGEX = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const TITLE_POLL_INTERVAL_MS = 3000;
 const QUERY_RESPONSE_CSI_REGEX = /^\u001b\[[0-9;?]*[Rn]/;
+const CLIENT_ENV_KEYS = new Set(['HOME', 'USER', 'LOGNAME', 'USERNAME']);
 
 const IGNORED_COMMANDS = [
     'export PROMPT_COMMAND',
@@ -35,6 +37,20 @@ function isIgnoredExecutionCommand(command) {
         command
         && IGNORED_COMMANDS.some((ignored) => command.includes(ignored))
     );
+}
+
+export function getClientEnvText(envText = '') {
+    if (!envText) return '';
+    const result = [];
+    for (const line of String(envText).split('\n')) {
+        const eqIndex = line.indexOf('=');
+        if (eqIndex <= 0) continue;
+        const key = line.slice(0, eqIndex);
+        if (CLIENT_ENV_KEYS.has(key)) {
+            result.push(line);
+        }
+    }
+    return result.join('\n');
 }
 
 const PROMPT_PREFIX = "You are now operating as an AI terminal assistant. Your name is `Tabminal`. You will assist users in resolving terminal or coding issues and answering other inquiries. When troubleshooting terminal errors, you will be provided with the execution history to understand the context. However, please focus primarily on the most recent runtime errors and the user's latest questions. Keep your answers concise and accurate. Resolve the issue clearly and provide the reasoning while avoiding lengthy elaborations. Most user terminal variable keys are normal under typical circumstances and do not need to be treated as security risks.\n\n";
@@ -260,7 +276,7 @@ export class TerminalSession {
                     if (newTitle && newTitle !== this.title) {
                         this.title = newTitle;
                         this.updatedAt = new Date();
-                        this._broadcast({ type: 'meta', title: this.title, cwd: this.cwd, env: this.env, cols: this.pty.cols, rows: this.pty.rows });
+                        this._broadcast({ type: 'meta', title: this.title });
                         this._emitStateChange();
                     }
                 } else if (s.startsWith('7;')) {
@@ -271,7 +287,7 @@ export class TerminalSession {
                             if (newCwd !== this.cwd) {
                                 this.cwd = newCwd;
                                 this.updatedAt = new Date();
-                                this._broadcast({ type: 'meta', title: this.title, cwd: this.cwd, env: this.env, cols: this.pty.cols, rows: this.pty.rows });
+                                this._broadcast({ type: 'meta', cwd: this.cwd });
                                 this._emitStateChange();
                             }
                         }
@@ -446,6 +462,8 @@ export class TerminalSession {
 
                 const titleChanged = newTitle && newTitle !== this.title;
                 const envChanged = newEnv !== null && newEnv !== this.env;
+                const clientEnvChanged = envChanged
+                    && getClientEnvText(newEnv) !== getClientEnvText(this.env);
                 const cwdChanged = newCwd && newCwd !== this.cwd;
 
                 if (titleChanged || envChanged || cwdChanged) {
@@ -453,7 +471,17 @@ export class TerminalSession {
                     if (envChanged) this.env = newEnv;
                     if (cwdChanged) this.cwd = newCwd;
                     this.updatedAt = new Date();
-                    this._broadcast({ type: 'meta', title: this.title, cwd: this.cwd, env: this.env, cols: this.pty.cols, rows: this.pty.rows });
+                    const meta = {
+                        type: 'meta',
+                        ...(titleChanged ? { title: this.title } : {}),
+                        ...(cwdChanged ? { cwd: this.cwd } : {}),
+                        ...(clientEnvChanged ? {
+                            env: getClientEnvText(this.env)
+                        } : {})
+                    };
+                    if (Object.keys(meta).length > 1) {
+                        this._broadcast(meta);
+                    }
                     this._emitStateChange();
                 }
             } catch { /* ignore */ }
@@ -518,7 +546,7 @@ export class TerminalSession {
         if (this.manager?.scheduleSnapshotPersist) {
             this.manager.scheduleSnapshotPersist(this.id);
         }
-        this._broadcast({ type: 'meta', title: this.title, cwd: this.cwd, env: this.env, cols, rows });
+        this._broadcast({ type: 'meta', cols, rows });
         this.updatedAt = new Date();
         this._emitStateChange();
         if (this.manager && this.manager.saveSessionState) {
@@ -567,6 +595,43 @@ export class TerminalSession {
         });
         snapshot += this._serializeExtraPrivateModes();
         return snapshot;
+    }
+
+    getHistoryWindow(options = {}) {
+        const total = this.history.length;
+        const rawBefore = Number.parseInt(String(options.before ?? total), 10);
+        const before = Number.isFinite(rawBefore)
+            ? Math.max(0, Math.min(total, rawBefore))
+            : total;
+        const rawLimit = Number.parseInt(String(options.limit ?? 0), 10);
+        const fallbackLimit = Math.max(
+            1,
+            (this.pty.cols || 80) * (this.pty.rows || 24)
+                * INITIAL_HISTORY_SCREEN_MULTIPLIER
+        );
+        const limit = Math.max(
+            1,
+            Math.min(
+                this.historyLimit,
+                Number.isFinite(rawLimit) && rawLimit > 0
+                    ? rawLimit
+                    : fallbackLimit
+            )
+        );
+        let start = Math.max(0, before - limit);
+        if (start > 0) {
+            const nextLineBreak = this.history.indexOf('\n', start);
+            if (nextLineBreak !== -1 && nextLineBreak < before) {
+                start = nextLineBreak + 1;
+            }
+        }
+        return {
+            data: this.history.slice(start, before),
+            start,
+            end: before,
+            total,
+            hasMoreBefore: start > 0
+        };
     }
 
     _routeIncoming(raw, ws) {
@@ -1413,13 +1478,22 @@ export class TerminalSession {
             return;
         }
 
-        const snapshot = await this.serializeSnapshot();
-        this._send(ws, { type: 'snapshot', data: snapshot });
+        const snapshotWindow = this.getHistoryWindow();
+        this._send(ws, {
+            type: 'snapshot',
+            data: snapshotWindow.data,
+            history: {
+                start: snapshotWindow.start,
+                end: snapshotWindow.end,
+                total: snapshotWindow.total,
+                hasMoreBefore: snapshotWindow.hasMoreBefore
+            }
+        });
         this._send(ws, {
             type: 'meta',
             title: this.title,
             cwd: this.cwd,
-            env: this.env,
+            env: getClientEnvText(this.env),
             cols: this.pty.cols,
             rows: this.pty.rows
         });

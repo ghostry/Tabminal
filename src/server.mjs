@@ -449,6 +449,22 @@ router.delete('/api/sessions/:id', async (ctx) => {
     ctx.status = 204;
 });
 
+router.get('/api/sessions/:id/history', async (ctx) => {
+    const { id } = ctx.params;
+    const session = terminalManager.getSession(id);
+    if (!session) {
+        ctx.status = 404;
+        ctx.body = { error: 'Session not found' };
+        return;
+    }
+    const before = Number.parseInt(String(ctx.query?.before || ''), 10);
+    const limit = Number.parseInt(String(ctx.query?.limit || ''), 10);
+    ctx.body = session.getHistoryWindow({
+        before: Number.isFinite(before) ? before : undefined,
+        limit: Number.isFinite(limit) ? limit : undefined
+    });
+});
+
 router.post('/api/sessions/:id/state', async (ctx) => {
     const { id } = ctx.params;
     const data = ctx.request.body;
@@ -778,6 +794,52 @@ router.post('/api/agents/tabs/:tabId/config', async (ctx) => {
         ctx.status = 500;
         ctx.body = { error: error?.message || 'Failed to update agent setting' };
     }
+});
+
+router.get('/api/agents/tabs/:tabId/timeline', async (ctx) => {
+    const { tabId } = ctx.params;
+    const before = Number.parseInt(String(ctx.query?.before || ''), 10);
+    const limit = Number.parseInt(String(ctx.query?.limit || ''), 10);
+    const tab = acpManager.getTabTimelineWindow(tabId, {
+        before: Number.isFinite(before) ? before : undefined,
+        limit: Number.isFinite(limit) ? limit : undefined
+    });
+    if (!tab) {
+        ctx.status = 404;
+        ctx.body = { error: 'Agent tab not found' };
+        return;
+    }
+    ctx.body = tab;
+});
+
+router.get('/api/agents/tabs/:tabId/tools/:toolCallId', async (ctx) => {
+    const { tabId, toolCallId } = ctx.params;
+    const detail = acpManager.getTabToolDetail(tabId, toolCallId, {
+        include: typeof ctx.query?.include === 'string'
+            ? ctx.query.include
+            : ''
+    });
+    if (!detail) {
+        ctx.status = 404;
+        ctx.body = { error: 'Tool call not found' };
+        return;
+    }
+    ctx.body = detail;
+});
+
+router.get('/api/agents/tabs/:tabId/permissions/:permissionId/detail', async (ctx) => {
+    const { tabId, permissionId } = ctx.params;
+    const detail = acpManager.getTabPermissionDetail(tabId, permissionId, {
+        include: typeof ctx.query?.include === 'string'
+            ? ctx.query.include
+            : ''
+    });
+    if (!detail) {
+        ctx.status = 404;
+        ctx.body = { error: 'Permission not found' };
+        return;
+    }
+    ctx.body = detail;
 });
 
 router.delete('/api/agents/tabs/:tabId', async (ctx) => {

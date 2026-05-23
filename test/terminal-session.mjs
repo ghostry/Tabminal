@@ -7,7 +7,9 @@ process.env.TABMINAL_OPENROUTER_KEY = ' ';
 process.env.TABMINAL_DEBUG = '1';
 process.env.TABMINAL_PASSWORD = 'test-password';
 
-const { TerminalSession } = await import('../src/terminal-session.mjs');
+const { TerminalSession, getClientEnvText } = await import(
+    '../src/terminal-session.mjs'
+);
 
 function buildExitSequence(exitCode, command) {
     const encoded = Buffer.from(command, 'utf8').toString('base64');
@@ -55,6 +57,51 @@ describe('TerminalSession', () => {
 
         assert.strictEqual(payloads[2].type, 'status');
         assert.strictEqual(payloads[2].status, 'ready');
+    });
+
+    it('sends only client-needed env keys over websocket meta', async () => {
+        session = new TerminalSession(pty, {
+            env: {
+                HOME: '/home/tester',
+                USER: 'tester',
+                SECRET_TOKEN: 'hidden'
+            }
+        });
+
+        const client = new MockSocket();
+        session.attach(client);
+        await client.waitForMessages(3);
+
+        const payloads = client.sent.map((raw) => JSON.parse(raw));
+        assert.strictEqual(payloads[1].type, 'meta');
+        assert.equal(payloads[1].env, 'HOME=/home/tester\nUSER=tester');
+        assert.doesNotMatch(payloads[1].env, /SECRET_TOKEN/);
+    });
+
+    it('filters client env text to display-only keys', () => {
+        assert.equal(
+            getClientEnvText('HOME=/home/a\nSECRET=value\nLOGNAME=a\nPATH=/bin'),
+            'HOME=/home/a\nLOGNAME=a'
+        );
+    });
+
+    it('sends only the initial terminal history window on attach', async () => {
+        pty.cols = 10;
+        pty.rows = 3;
+        session = new TerminalSession(pty, { historyLimit: 1024 });
+        for (let i = 1; i <= 12; i += 1) {
+            pty.emitData(`line-${String(i).padStart(2, '0')}\n`);
+        }
+
+        const client = new MockSocket();
+        session.attach(client);
+        await client.waitForMessages(3);
+
+        const payloads = client.sent.map((raw) => JSON.parse(raw));
+        assert.strictEqual(payloads[0].type, 'snapshot');
+        assert.equal(payloads[0].history.hasMoreBefore, true);
+        assert.match(payloads[0].data, /line-12/);
+        assert.doesNotMatch(payloads[0].data, /line-01/);
     });
 
     it('writes user input to the underlying pty', async () => {

@@ -115,7 +115,7 @@ describe('TerminalManager workspace sync', () => {
             initialCwd: '/tmp',
             title: 'bash',
             cwd: '/tmp',
-            env: '',
+            env: 'HOME=/home/tester\nSECRET=value\nUSER=tester',
             pty: { cols: 120, rows: 30 },
             closed: false,
             exitStatus: null,
@@ -126,6 +126,7 @@ describe('TerminalManager workspace sync', () => {
 
         const listed = manager.listSessions();
         assert.equal(listed.length, 1);
+        assert.equal(listed[0].env, 'HOME=/home/tester\nUSER=tester');
         assert.deepEqual(listed[0].workspaceState, workspaceState);
         assert.deepEqual(listed[0].editorState, workspaceState);
     });

@@ -139,11 +139,11 @@ const HEARTBEAT_INTERVAL_MS = 10000;
 const RECONNECT_RETRY_MS = 5000;
 const FILE_TREE_REFRESH_INTERVAL_MS = 10000;
 const FILE_VERSION_CHECK_INTERVAL_MS = 10000;
+const TERMINAL_HISTORY_LOAD_CHARS = 96 * 24;
 const AGENT_TRANSCRIPT_INITIAL_VISIBLE_BLOCKS = 30;
 const AGENT_TRANSCRIPT_WINDOW_STEP = 10;
 const AGENT_TRANSCRIPT_FOLLOW_LATEST_TOLERANCE = 5;
 const AGENT_TRANSCRIPT_RENDER_DEBOUNCE_MS = 300;
-const AGENT_TRANSCRIPT_AUTH_SYNC_DEBOUNCE_MS = 300;
 const WORKSPACE_TAB_TITLE_MAX_LENGTH = 20;
 const MAIN_SERVER_ID = 'main';
 const RUNTIME_BOOT_ID_STORAGE_KEY = 'tabminal_runtime_boot_id';
@@ -7397,6 +7397,42 @@ class EditorManager {
             timeline.length
         );
         if (transcriptWindow.start <= 0) {
+            if (!agentTab.timelineWindowHasMoreBefore) {
+                return;
+            }
+            const anchor = timeline.length > 0
+                ? this.captureAgentTranscriptAnchor(
+                    getAgentTimelineItemKey(timeline[0], 0)
+                )
+                : null;
+            agentTab.historyWindowLoading = true;
+            try {
+                const params = new URLSearchParams({
+                    before: String(agentTab.timelineWindowStart),
+                    limit: String(AGENT_TRANSCRIPT_WINDOW_STEP)
+                });
+                const response = await agentTab.server.fetch(
+                    `/api/agents/tabs/${encodeURIComponent(agentTab.id)}/timeline?${params}`
+                );
+                if (!response.ok) return;
+                const data = await response.json();
+                agentTab.mergeTimelineWindow(data);
+                const nextTimeline = getAgentTimelineItems(agentTab);
+                agentTab.historyWindowStart = 0;
+                agentTab.historyWindowEnd = Math.min(
+                    nextTimeline.length,
+                    Math.max(
+                        AGENT_TRANSCRIPT_INITIAL_VISIBLE_BLOCKS,
+                        transcriptWindow.end + AGENT_TRANSCRIPT_WINDOW_STEP
+                    )
+                );
+                this.renderAgentPanel(agentTab, {
+                    reason: 'history-older-fetch',
+                    preserveTranscriptAnchor: anchor
+                });
+            } finally {
+                agentTab.historyWindowLoading = false;
+            }
             return;
         }
         agentTab.scrollToBottomOnNextRender = false;
@@ -7798,28 +7834,6 @@ class EditorManager {
             status
         ));
 
-        const header = document.createElement('div');
-        header.className = 'agent-tool-call-header';
-
-        const title = document.createElement('div');
-        title.className = 'agent-tool-call-title';
-        title.textContent = getAgentToolTitle(toolCall);
-
-        header.appendChild(title);
-        node.appendChild(header);
-
-        const meta = document.createElement('div');
-        meta.className = 'agent-tool-call-meta';
-        meta.textContent = buildAgentToolMeta(toolCall);
-        if (meta.textContent) {
-            node.appendChild(meta);
-        }
-
-        const pathLinks = buildAgentPathLinks(agentTab, toolCall);
-        if (pathLinks) {
-            node.appendChild(pathLinks);
-        }
-
         const summaryText = buildAgentToolSummary(toolCall, agentTab.terminals);
         if (summaryText) {
             const summary = document.createElement('div');
@@ -7831,8 +7845,21 @@ class EditorManager {
         const sections = buildAgentToolSections(
             toolCall,
             summaryText,
-            agentTab.terminals
+            agentTab.terminals,
+            { includeInputSection: false }
         );
+        if (
+            toolCall.detailsAvailable
+            && !toolCall.detailsLoaded
+            && sections.length === 0
+        ) {
+            sections.unshift({
+                label: 'Details',
+                preview: 'Load output',
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId
+            });
+        }
         if (sections.length > 0) {
             const sectionContainer = document.createElement('div');
             sectionContainer.className = 'agent-tool-call-sections';
@@ -7851,9 +7878,7 @@ class EditorManager {
                         buildAgentSectionSummaryPreviewNode(preview)
                     );
                 }
-                details.open = shouldExpandAgentTimelineSections(
-                    toolStatusClass
-                );
+                details.open = false;
                 details.appendChild(summary);
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
@@ -7943,6 +7968,14 @@ class EditorManager {
             summaryText,
             agentTab.terminals
         );
+        if (permission.detailsAvailable && !permission.detailsLoaded) {
+            sections.unshift({
+                label: 'Details',
+                preview: 'Load output',
+                kind: 'permission-detail-loader',
+                permissionId: permission.id
+            });
+        }
         if (sections.length > 0) {
             const sectionContainer = document.createElement('div');
             sectionContainer.className = 'agent-tool-call-sections';
@@ -7961,9 +7994,7 @@ class EditorManager {
                         buildAgentSectionSummaryPreviewNode(preview)
                     );
                 }
-                details.open = shouldExpandAgentTimelineSections(
-                    permission.status || 'pending'
-                );
+                details.open = false;
                 details.appendChild(summary);
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
@@ -8115,6 +8146,12 @@ class EditorManager {
     }
 
     buildAgentSectionBody(details, section) {
+        if (section?.kind === 'tool-detail-loader') {
+            return this.buildAgentDetailLoaderBody(details, section, 'tool');
+        }
+        if (section?.kind === 'permission-detail-loader') {
+            return this.buildAgentDetailLoaderBody(details, section, 'permission');
+        }
         if (
             section?.kind === 'diff'
             && this.monacoInstance
@@ -8135,6 +8172,45 @@ class EditorManager {
         const body = document.createElement('pre');
         body.className = 'agent-tool-call-body';
         body.textContent = section?.text || '';
+        return body;
+    }
+
+    buildAgentDetailLoaderBody(details, section, kind) {
+        const body = document.createElement('div');
+        body.className = 'agent-tool-call-body';
+        body.textContent = 'Loading details...';
+        const load = async () => {
+            const agentTab = getActiveAgentTab();
+            if (!agentTab) return;
+            try {
+                if (kind === 'tool') {
+                    await agentTab.loadToolDetails(section.toolCallId, {
+                        include: section.detailInclude || ''
+                    });
+                } else {
+                    await agentTab.loadPermissionDetails(section.permissionId, {
+                        include: section.detailInclude || ''
+                    });
+                }
+                this.renderAgentPanel(agentTab, {
+                    preserveTranscriptAnchor: this.captureAgentTranscriptAnchor(
+                        details.closest('[data-timeline-key]')?.dataset
+                            ?.timelineKey || ''
+                    )
+                });
+            } catch (error) {
+                body.textContent = error?.message || 'Failed to load details.';
+            }
+        };
+        if (details.open) {
+            void load();
+        } else {
+            details.addEventListener('toggle', () => {
+                if (details.open) {
+                    void load();
+                }
+            }, { once: true });
+        }
         return body;
     }
 
@@ -9934,6 +10010,14 @@ class Session {
         this.managed = normalizeManagedSessionMeta(data.managed);
         this.closed = !!data.closed;
         this.exitStatus = data.exitStatus || null;
+        this.loadedTerminalText = '';
+        this.terminalHistoryStart = 0;
+        this.terminalHistoryEnd = 0;
+        this.terminalHistoryTotal = 0;
+        this.terminalHistoryHasMoreBefore = false;
+        this.terminalHistoryLoading = false;
+        this.isRestoring = false;
+        this.lastTerminalReplayFinishedAt = 0;
         
         this.saveStateTimer = null;
         this.runningCommand = '';
@@ -10130,6 +10214,15 @@ class Session {
 
             const pending = getPendingSession(this.key);
             pending.resize = { cols: size.cols, rows: size.rows };
+        });
+
+        this.mainTerm.onScroll((line) => {
+            if (this.isRestoring || Date.now() - this.lastTerminalReplayFinishedAt < 250) {
+                return;
+            }
+            if (line <= 2) {
+                void this.loadOlderTerminalHistory();
+            }
         });
     }
 
@@ -10606,11 +10699,15 @@ class Session {
     handleMessage(message) {
         switch (message.type) {
             case 'snapshot':
-                this.isRestoring = true;
+                this.loadedTerminalText = message.data || '';
+                this.updateTerminalHistoryWindow(message.history || {
+                    start: 0,
+                    end: this.loadedTerminalText.length,
+                    total: this.loadedTerminalText.length,
+                    hasMoreBefore: false
+                });
                 this.recreateTerminals();
-                if (this.previewTerm) this.previewTerm.write(message.data || '');
-                this.mainTerm.write(message.data || '', () => {
-                    this.isRestoring = false;
+                this.replayLoadedTerminalText(() => {
                     if (state.activeSessionKey === this.key) {
                         if (this.fitMainTerminalIfVisible()) {
                             this.mainTerm.focus();
@@ -10751,8 +10848,93 @@ class Session {
     }
 
     writeToTerminals(data) {
+        if (typeof data === 'string' && data) {
+            this.loadedTerminalText += data;
+            this.terminalHistoryEnd += data.length;
+            this.terminalHistoryTotal = Math.max(
+                this.terminalHistoryTotal,
+                this.terminalHistoryEnd
+            );
+        }
         if (this.previewTerm) this.previewTerm.write(data);
         this.mainTerm.write(data);
+    }
+
+    updateTerminalHistoryWindow(history = {}) {
+        this.terminalHistoryStart = Number.isFinite(history.start)
+            ? history.start
+            : 0;
+        this.terminalHistoryEnd = Number.isFinite(history.end)
+            ? history.end
+            : this.loadedTerminalText.length;
+        this.terminalHistoryTotal = Number.isFinite(history.total)
+            ? history.total
+            : this.terminalHistoryEnd;
+        this.terminalHistoryHasMoreBefore = !!history.hasMoreBefore;
+    }
+
+    replayLoadedTerminalText(callback = null) {
+        this.isRestoring = true;
+        this.previewTerm?.reset?.();
+        this.mainTerm?.reset?.();
+        if (this.previewTerm) {
+            this.previewTerm.write(this.loadedTerminalText || '');
+        }
+        this.mainTerm.write(this.loadedTerminalText || '', () => {
+            this.isRestoring = false;
+            this.lastTerminalReplayFinishedAt = Date.now();
+            if (typeof callback === 'function') {
+                callback();
+            }
+        });
+    }
+
+    async loadOlderTerminalHistory() {
+        if (
+            this.terminalHistoryLoading
+            || this.isRestoring
+            || Date.now() - this.lastTerminalReplayFinishedAt < 250
+            || !this.terminalHistoryHasMoreBefore
+            || this.terminalHistoryStart <= 0
+            || !this.server?.isAuthenticated
+        ) {
+            return;
+        }
+        this.terminalHistoryLoading = true;
+        try {
+            const params = new URLSearchParams({
+                before: String(this.terminalHistoryStart),
+                limit: String(TERMINAL_HISTORY_LOAD_CHARS)
+            });
+            const response = await this.server.fetch(
+                `/api/sessions/${encodeURIComponent(this.id)}/history?${params}`
+            );
+            if (!response.ok) return;
+            const windowData = await response.json();
+            const chunk = typeof windowData?.data === 'string'
+                ? windowData.data
+                : '';
+            if (!chunk) {
+                this.terminalHistoryHasMoreBefore = false;
+                return;
+            }
+            this.loadedTerminalText = `${chunk}${this.loadedTerminalText}`;
+            this.updateTerminalHistoryWindow({
+                start: windowData.start,
+                end: this.terminalHistoryEnd,
+                total: windowData.total,
+                hasMoreBefore: windowData.hasMoreBefore
+            });
+            this.replayLoadedTerminalText(() => {
+                try {
+                    this.mainTerm.scrollToLine?.(chunk.split('\n').length);
+                } catch {
+                    // Ignore scroll restoration failures.
+                }
+            });
+        } finally {
+            this.terminalHistoryLoading = false;
+        }
     }
 
     isMainTerminalVisible() {
@@ -10933,6 +11115,10 @@ class AgentTab {
         this.historyWindowStart = -1;
         this.historyWindowEnd = -1;
         this.historyWindowLoading = false;
+        this.timelineWindowStart = 0;
+        this.timelineWindowEnd = 0;
+        this.timelineWindowTotal = 0;
+        this.timelineWindowHasMoreBefore = false;
         this.streamingAssistantStreamKey = '';
         this.resumeSessions = [];
         this.resumeSessionsLoadedAt = 0;
@@ -10975,6 +11161,188 @@ class AgentTab {
             dirtyKey: options.dirtyKey || '',
             authoritativeSync: !!options.authoritativeSync
         });
+    }
+
+    updateTimelineWindow(windowData = null) {
+        if (!windowData || typeof windowData !== 'object') {
+            const total = getAgentTimelineItems(this).length;
+            this.timelineWindowStart = 0;
+            this.timelineWindowEnd = total;
+            this.timelineWindowTotal = total;
+            this.timelineWindowHasMoreBefore = false;
+            return;
+        }
+        this.timelineWindowStart = Number.isFinite(windowData.start)
+            ? Math.max(0, windowData.start)
+            : this.timelineWindowStart;
+        this.timelineWindowEnd = Number.isFinite(windowData.end)
+            ? Math.max(this.timelineWindowStart, windowData.end)
+            : this.timelineWindowEnd;
+        this.timelineWindowTotal = Number.isFinite(windowData.total)
+            ? Math.max(0, windowData.total)
+            : this.timelineWindowTotal;
+        this.timelineWindowHasMoreBefore = !!windowData.hasMoreBefore;
+    }
+
+    mergeTimelineWindow(data = {}) {
+        if (Array.isArray(data.messages)) {
+            const seen = new Set(this.messages.map((message) =>
+                `${message.id || ''}:${message.streamKey || ''}`
+            ));
+            for (const message of data.messages) {
+                const normalized = this.#normalizeMessage(message);
+                const key = `${normalized.id || ''}:${normalized.streamKey || ''}`;
+                if (!seen.has(key)) {
+                    this.messages.push(normalized);
+                    seen.add(key);
+                }
+            }
+            this.messages.sort((left, right) =>
+                (Number(left?.order) || 0) - (Number(right?.order) || 0)
+            );
+        }
+        for (const toolCall of data.toolCalls || []) {
+            if (toolCall?.toolCallId && !this.toolCalls.has(toolCall.toolCallId)) {
+                this.toolCalls.set(
+                    toolCall.toolCallId,
+                    this.#normalizeTimelineEntry(toolCall)
+                );
+            }
+        }
+        for (const permission of data.permissions || []) {
+            if (permission?.id && !this.permissions.has(permission.id)) {
+                this.permissions.set(
+                    permission.id,
+                    this.#normalizeTimelineEntry(permission)
+                );
+            }
+        }
+        if (Array.isArray(data.plan) && data.plan.length > 0) {
+            const existing = new Set((this.planHistory || []).map((entry) =>
+                `${entry.order || ''}:${entry.text || entry.title || ''}`
+            ));
+            const nextPlan = [...(this.planHistory || [])];
+            for (const entry of data.plan) {
+                const normalized = this.#normalizePlanEntry(entry);
+                const key = `${normalized.order || ''}:${normalized.text || normalized.title || ''}`;
+                if (!existing.has(key)) {
+                    nextPlan.push(normalized);
+                    existing.add(key);
+                }
+            }
+            this.#applyPlanState(nextPlan.sort((left, right) =>
+                (Number(left?.order) || 0) - (Number(right?.order) || 0)
+            ));
+        }
+        this.updateTimelineWindow(data.timelineWindow);
+    }
+
+    async loadToolDetails(toolCallId, options = {}) {
+        const id = String(toolCallId || '').trim();
+        if (!id) return null;
+        const existing = this.toolCalls.get(id);
+        const include = String(options.include || '').trim();
+        if (!include && existing?.detailsLoaded) return existing;
+        const params = new URLSearchParams();
+        if (include) {
+            params.set('include', include);
+        }
+        const query = params.toString();
+        const response = await this.server.fetch(
+            `/api/agents/tabs/${encodeURIComponent(this.id)}/tools/${encodeURIComponent(id)}${query ? `?${query}` : ''}`
+        );
+        if (!response.ok) {
+            await throwResponseError(response, 'Failed to load tool details');
+        }
+        const data = await response.json();
+        for (const terminal of data.terminals || []) {
+            if (terminal?.terminalId) {
+                this.terminals.set(
+                    terminal.terminalId,
+                    this.#normalizeTerminalSummary(terminal)
+                );
+            }
+        }
+        if (data.toolCall?.toolCallId) {
+            const normalizedDetail = this.#normalizeTimelineEntry(data.toolCall);
+            const previous = this.toolCalls.get(data.toolCall.toolCallId) || {};
+            const complete = data.complete !== false && !include;
+            const next = complete
+                ? {
+                    ...normalizedDetail,
+                    detailsLoaded: true,
+                    detailsAvailable: false
+                }
+                : {
+                    ...previous,
+                    ...normalizedDetail,
+                    content: mergeAgentToolContentItems(
+                        previous.content,
+                        normalizedDetail.content
+                    ),
+                    detailsLoaded: false,
+                    detailsAvailable: true
+                };
+            this.toolCalls.set(data.toolCall.toolCallId, next);
+            return next;
+        }
+        return null;
+    }
+
+    async loadPermissionDetails(permissionId, options = {}) {
+        const id = String(permissionId || '').trim();
+        if (!id) return null;
+        const existing = this.permissions.get(id);
+        const include = String(options.include || '').trim();
+        if (!include && existing?.detailsLoaded) return existing;
+        const params = new URLSearchParams();
+        if (include) {
+            params.set('include', include);
+        }
+        const query = params.toString();
+        const response = await this.server.fetch(
+            `/api/agents/tabs/${encodeURIComponent(this.id)}/permissions/${encodeURIComponent(id)}/detail${query ? `?${query}` : ''}`
+        );
+        if (!response.ok) {
+            await throwResponseError(response, 'Failed to load permission details');
+        }
+        const data = await response.json();
+        for (const terminal of data.terminals || []) {
+            if (terminal?.terminalId) {
+                this.terminals.set(
+                    terminal.terminalId,
+                    this.#normalizeTerminalSummary(terminal)
+                );
+            }
+        }
+        if (data.permission?.id) {
+            const normalizedDetail = this.#normalizeTimelineEntry(data.permission);
+            const previous = this.permissions.get(data.permission.id) || {};
+            const complete = data.complete !== false && !include;
+            const next = complete
+                ? {
+                    ...normalizedDetail,
+                    detailsLoaded: true,
+                    detailsAvailable: false
+                }
+                : {
+                    ...previous,
+                    ...normalizedDetail,
+                    toolCall: {
+                        ...(previous.toolCall || {}),
+                        ...(normalizedDetail.toolCall || {}),
+                        content: mergeAgentToolContentItems(
+                            previous.toolCall?.content,
+                            normalizedDetail.toolCall?.content
+                        )
+                    },
+                    detailsLoaded: false,
+                    detailsAvailable: true
+                };
+            this.permissions.set(data.permission.id, next);
+            return next;
+        }
+        return null;
     }
 
     update(data) {
@@ -11074,6 +11442,7 @@ class AgentTab {
             }
         }
         this.#applyPlanState(nextPlan);
+        this.updateTimelineWindow(data.timelineWindow);
         this.#syncBusyWatchdog();
     }
 
@@ -11231,12 +11600,16 @@ class AgentTab {
             case 'permission_request':
                 if (message.permission?.id) {
                     const previous = this.permissions.get(message.permission.id);
+                    const nextPermission = this.#normalizeTimelineEntry(
+                        message.permission,
+                        previous?.order
+                    );
                     this.permissions.set(message.permission.id, {
-                        ...previous,
-                        ...this.#normalizeTimelineEntry(
-                            message.permission,
-                            previous?.order
-                        )
+                        ...(nextPermission.detailsAvailable
+                            && !previous?.detailsLoaded
+                            ? {}
+                            : previous),
+                        ...nextPermission
                     });
                 }
                 notifyOptions = {
@@ -11271,9 +11644,20 @@ class AgentTab {
                     const previous = this.terminals.get(
                         message.terminal.terminalId
                     ) || {};
+                    const terminalUpdate = { ...message.terminal };
+                    if (
+                        typeof terminalUpdate.outputAppend === 'string'
+                        && typeof previous.output === 'string'
+                        && typeof terminalUpdate.output !== 'string'
+                    ) {
+                        terminalUpdate.output = previous.output
+                            + terminalUpdate.outputAppend;
+                    }
+                    delete terminalUpdate.outputAppend;
+                    delete terminalUpdate.outputLength;
                     const nextSummary = this.#normalizeTerminalSummary({
                         ...previous,
-                        ...message.terminal
+                        ...terminalUpdate
                     });
                     this.terminals.set(
                         message.terminal.terminalId,
@@ -11359,14 +11743,6 @@ class AgentTab {
             this.needsAttention = false;
         }
         this.#syncBusyWatchdog();
-        if (wasBusy && !this.busy) {
-            notifyOptions = {
-                ...notifyOptions,
-                full: true,
-                authoritativeSync: true,
-                delayMs: AGENT_TRANSCRIPT_AUTH_SYNC_DEBOUNCE_MS
-            };
-        }
         this.notifyUi(notifyOptions);
         if (shouldAutostartQueuedPrompt) {
             this.lastCompletedRunCounter = this.runCounter;
@@ -11407,25 +11783,6 @@ class AgentTab {
 
     #syncBusyWatchdog() {
         this.#clearBusyWatchdog();
-        if (!this.#needsBusyStateRefresh()) {
-            return;
-        }
-        this.busySyncTimer = setTimeout(async () => {
-            this.busySyncTimer = null;
-            if (!this.#needsBusyStateRefresh()) {
-                return;
-            }
-            try {
-                await syncAgentsForServer(this.server, { force: true });
-            } catch {
-                // Ignore transient refresh failures; the next event or sync
-                // will reconcile the state.
-            } finally {
-                if (this.#needsBusyStateRefresh()) {
-                    this.#syncBusyWatchdog();
-                }
-            }
-        }, 2000);
     }
 
     #normalizeTimelineEntry(entry, fallbackOrder = null) {
@@ -11696,9 +12053,15 @@ class AgentTab {
             case 'tool_call':
                 if (update.toolCallId) {
                     const previous = this.toolCalls.get(update.toolCallId);
+                    const nextToolCall = this.#normalizeTimelineEntry(
+                        update,
+                        previous?.order
+                    );
                     this.toolCalls.set(
                         update.toolCallId,
-                        this.#normalizeTimelineEntry(update, previous?.order)
+                        nextToolCall.detailsAvailable && !previous?.detailsLoaded
+                            ? nextToolCall
+                            : { ...previous, ...nextToolCall }
                     );
                 }
                 return {
@@ -11709,9 +12072,15 @@ class AgentTab {
                 };
             case 'tool_call_update': {
                 const previous = this.toolCalls.get(update.toolCallId) || {};
+                const nextToolCall = this.#normalizeTimelineEntry(
+                    update,
+                    previous.order
+                );
                 this.toolCalls.set(update.toolCallId, {
-                    ...previous,
-                    ...this.#normalizeTimelineEntry(update, previous.order)
+                    ...(nextToolCall.detailsAvailable && !previous.detailsLoaded
+                        ? {}
+                        : previous),
+                    ...nextToolCall
                 });
                 return {
                     full: false,
@@ -11761,11 +12130,6 @@ class AgentTab {
     }
 
     async sendPrompt(text, attachments = []) {
-        const baseline = {
-            messageCount: this.messages.length,
-            toolCount: this.toolCalls.size,
-            permissionCount: this.permissions.size
-        };
         const hasAttachments = Array.isArray(attachments)
             && attachments.length > 0;
         const request = {
@@ -11796,31 +12160,6 @@ class AgentTab {
             await throwResponseError(response, 'Failed to send prompt');
         }
         await syncAgentsForServer(this.server, { force: true });
-        void this.#reconcilePromptStart(baseline);
-    }
-
-    async #reconcilePromptStart(baseline, timeoutMs = 4000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            await new Promise((resolve) => {
-                setTimeout(resolve, 200);
-            });
-            await syncAgentsForServer(this.server, { force: true });
-            const current = state.agentTabs.get(this.key);
-            if (!current) {
-                return;
-            }
-            if (current.errorMessage || !current.busy) {
-                return;
-            }
-            if (
-                current.messages.length > baseline.messageCount
-                || current.toolCalls.size > baseline.toolCount
-                || current.permissions.size > baseline.permissionCount
-            ) {
-                return;
-            }
-        }
     }
 
     applyInventory(data) {
@@ -11904,20 +12243,6 @@ class AgentTab {
         return true;
     }
 
-    async #waitForSettled(timeoutMs = 5000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            await syncAgentsForServer(this.server, { force: true });
-            const current = state.agentTabs.get(this.key);
-            if (!current || !current.busy) {
-                return;
-            }
-            await new Promise((resolve) => {
-                setTimeout(resolve, 150);
-            });
-        }
-    }
-
     async cancel() {
         const response = await this.server.fetch(
             `/api/agents/tabs/${this.id}/cancel`,
@@ -11928,7 +12253,7 @@ class AgentTab {
         if (!response.ok) {
             await throwResponseError(response, 'Failed to stop prompt');
         }
-        await this.#waitForSettled();
+        await syncAgentsForServer(this.server, { force: true });
     }
 
     async resolvePermission(permissionId, optionId = '') {
@@ -11962,7 +12287,7 @@ class AgentTab {
             );
         }
         const data = await response.json();
-        this.update(data);
+        this.applyInventory(data);
         this.notifyUi();
     }
 
@@ -11979,7 +12304,7 @@ class AgentTab {
             await throwResponseError(response, 'Failed to switch mode');
         }
         const data = await response.json();
-        this.update(data);
+        this.applyInventory(data);
         this.notifyUi();
     }
 
@@ -14035,15 +14360,6 @@ function getAgentOrderedMapValues(map) {
     });
 }
 
-function shouldExpandAgentTimelineSections(status = '') {
-    const statusClass = normalizeStatusClass(status);
-    return (
-        statusClass === 'pending'
-        || statusClass === 'running'
-        || statusClass === 'error'
-    );
-}
-
 function getAgentComposerFeedback(agentTab) {
     if (!agentTab) return null;
 
@@ -14418,27 +14734,13 @@ function buildAgentPathLinks(agentTab, toolLike) {
 }
 
 function buildAgentToolSummary(toolCall, terminals = null) {
-    const stdout = compactAgentSummaryText(toolCall?.rawOutput?.stdout || '');
-    if (stdout) return stdout;
-
-    const stderr = compactAgentSummaryText(toolCall?.rawOutput?.stderr || '');
-    if (stderr) return stderr;
-
-    const formatted = compactAgentSummaryText(
-        toolCall?.rawOutput?.formatted_output || ''
+    void terminals;
+    const inputSummary = compactAgentSummaryText(
+        summarizeAgentRawInput(toolCall?.rawInput)
     );
-    if (formatted) return formatted;
-
-    const contentSummary = compactAgentSummaryText(
-        summarizeToolCallContent(toolCall, terminals)
-    );
-    if (contentSummary) return contentSummary;
-
-    const changeSummary = compactAgentSummaryText(
-        summarizeToolChanges(toolCall?.rawInput)
-    );
-    if (changeSummary) return changeSummary;
-
+    if (inputSummary) return inputSummary;
+    const title = compactAgentSummaryText(getAgentToolTitle(toolCall));
+    if (title) return title;
     return '';
 }
 
@@ -14484,7 +14786,7 @@ function getFirstToolPath(toolCall) {
 function summarizeAgentRawOutput(rawOutput) {
     if (typeof rawOutput === 'string' && rawOutput) {
         const outputMatch = rawOutput.match(/Output:\n([\s\S]*)$/);
-        return compactAgentSummaryText(outputMatch?.[1] || rawOutput);
+        return outputMatch?.[1] || rawOutput;
     }
     if (!rawOutput || typeof rawOutput !== 'object') return '';
     const parts = [];
@@ -14509,7 +14811,7 @@ function summarizeAgentRawOutput(rawOutput) {
         parts.push(`OUTPUT\n${rawOutput.formatted_output}`);
     }
     if (parts.length > 0) {
-        return truncateAgentDetail(parts.join('\n\n'));
+        return parts.join('\n\n');
     }
     if (rawOutput.success === false) {
         return 'Tool call failed.';
@@ -14619,13 +14921,50 @@ function summarizeToolCallContent(toolCall, terminals = null) {
     return truncateAgentDetail(lines.join('\n\n'));
 }
 
-function getToolCallDiffItems(toolCall) {
-    if (!Array.isArray(toolCall?.content)) return [];
-    return toolCall.content.filter((item) =>
-        item?.type === 'diff'
-        && item.path
-        && typeof item.newText === 'string'
-    );
+function getAgentToolContentKey(item) {
+    if (!item || typeof item !== 'object') return '';
+    if (item.type === 'terminal') {
+        return `terminal:${String(item.terminalId || '')}`;
+    }
+    if (item.type === 'diff') {
+        return `diff:${String(item.path || '')}`;
+    }
+    if (item.type === 'content') {
+        const content = item.content || {};
+        const resourceUri = content.resource?.uri || '';
+        if (resourceUri) return `content:${resourceUri}`;
+        return `content:${String(content.type || '')}:${String(content.text || '')}`;
+    }
+    return `${String(item.type || '')}:${JSON.stringify(item)}`;
+}
+
+function mergeAgentToolContentItems(previous, incoming) {
+    const previousItems = Array.isArray(previous) ? previous : [];
+    const incomingItems = Array.isArray(incoming) ? incoming : [];
+    if (incomingItems.length === 0) return previousItems;
+    const incomingByKey = new Map();
+    for (const item of incomingItems) {
+        const key = getAgentToolContentKey(item);
+        if (key) {
+            incomingByKey.set(key, item);
+        }
+    }
+    const usedKeys = new Set();
+    const merged = previousItems.map((item) => {
+        const key = getAgentToolContentKey(item);
+        if (key && incomingByKey.has(key)) {
+            usedKeys.add(key);
+            return incomingByKey.get(key);
+        }
+        return item;
+    });
+    for (const item of incomingItems) {
+        const key = getAgentToolContentKey(item);
+        if (!key || !usedKeys.has(key)) {
+            merged.push(item);
+        }
+    }
+    return merged;
 }
 
 function resourceUriToPath(uri) {
@@ -14704,7 +15043,10 @@ function buildAgentStructuredContentSections(
     terminals = null
 ) {
     const sections = [];
-
+    const shouldLoadDetails = !!(
+        toolCall?.detailsAvailable
+        && !toolCall?.detailsLoaded
+    );
     if (Array.isArray(toolCall?.content)) {
         for (const item of toolCall.content) {
             if (item?.type === 'terminal' && item.terminalId) {
@@ -14712,6 +15054,16 @@ function buildAgentStructuredContentSections(
                     terminals,
                     item.terminalId
                 );
+                if (shouldLoadDetails && !terminal?.output) {
+                    sections.push({
+                        label: 'Terminal',
+                        preview: terminal?.command || item.terminalId,
+                        kind: 'tool-detail-loader',
+                        toolCallId: toolCall.toolCallId,
+                        detailInclude: 'terminal'
+                    });
+                    continue;
+                }
                 sections.push({
                     label: 'Terminal',
                     preview: terminal?.command || item.terminalId,
@@ -14719,20 +15071,45 @@ function buildAgentStructuredContentSections(
                     kind: 'terminal',
                     terminal
                 });
+                continue;
+            }
+            if (item?.type === 'diff' && item.path) {
+                if (typeof item.newText === 'string') {
+                    sections.push({
+                        label: 'Diff',
+                        preview: normalizeToolPathLabel(item.path),
+                        text: truncateAgentDetail(item.newText || ''),
+                        kind: 'diff',
+                        path: item.path,
+                        oldText: item.oldText || '',
+                        newText: item.newText || ''
+                    });
+                } else if (shouldLoadDetails) {
+                    sections.push({
+                        label: 'Diff',
+                        preview: normalizeToolPathLabel(item.path),
+                        kind: 'tool-detail-loader',
+                        toolCallId: toolCall.toolCallId,
+                        detailInclude: 'diff'
+                    });
+                }
+                continue;
+            }
+            if (item?.type === 'content' && shouldLoadDetails) {
+                const path = resourceUriToPath(item.content?.resource?.uri || '');
+                sections.push({
+                    label: 'Content',
+                    preview: path ? normalizeToolPathLabel(path) : 'Load content',
+                    kind: 'tool-detail-loader',
+                    toolCallId: toolCall.toolCallId,
+                    detailInclude: 'content'
+                });
             }
         }
     }
 
-    for (const item of getToolCallDiffItems(toolCall)) {
-        sections.push({
-            label: 'Diff',
-            preview: normalizeToolPathLabel(item.path),
-            text: truncateAgentDetail(item.newText || ''),
-            kind: 'diff',
-            path: item.path,
-            oldText: item.oldText || '',
-            newText: item.newText || ''
-        });
+    if (shouldLoadDetails) {
+        return sections;
     }
 
     const textBlocks = getToolCallTextContentBlocks(toolCall);
@@ -14833,14 +15210,20 @@ function buildAgentToolMeta(toolCall) {
     return parts.join(' · ');
 }
 
-function buildAgentToolSections(toolCall, summaryText = '', terminals = null) {
+function buildAgentToolSections(
+    toolCall,
+    summaryText = '',
+    terminals = null,
+    options = {}
+) {
     const sections = [];
     const title = getAgentToolTitle(toolCall);
     const rawInput = summarizeAgentRawInput(toolCall?.rawInput);
     const normalizedTitle = normalizeAgentComparableText(title);
     const normalizedInput = normalizeAgentComparableText(rawInput);
     if (
-        rawInput
+        options.includeInputSection !== false
+        && rawInput
         && normalizedInput
         && normalizedInput !== normalizedTitle
     ) {
@@ -14955,7 +15338,15 @@ function buildAgentPermissionSections(
         permission?.toolCall || {},
         summaryText,
         terminals
-    );
+    ).map((section) => (
+        section?.kind === 'tool-detail-loader'
+            ? {
+                ...section,
+                kind: 'permission-detail-loader',
+                permissionId: permission?.id || ''
+            }
+            : section
+    ));
     const selectedOption = getPermissionOptionById(
         permission,
         permission?.selectedOptionId || ''

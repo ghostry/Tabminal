@@ -241,13 +241,15 @@ class FakeRuntime extends EventEmitter {
                     sessionId: 'hist-1',
                     cwd: (all ? '/tmp/other-project' : cwd) || this.cwd,
                     title: 'Previous run',
-                    updatedAt: '2026-03-27T00:00:00.000Z'
+                    updatedAt: '2026-03-27T00:00:00.000Z',
+                    transcript: 'large transcript'
                 },
                 {
                     sessionId: 'hist-2',
                     cwd: (all ? '/tmp/project' : cwd) || this.cwd,
                     title: 'Earlier run',
-                    updatedAt: '2026-03-26T00:00:00.000Z'
+                    updatedAt: '2026-03-26T00:00:00.000Z',
+                    metadata: { tokens: 123 }
                 }
             ],
             nextCursor: ''
@@ -1095,6 +1097,9 @@ describe('AcpManager', () => {
                 ['hist-2', '/tmp/project']
             ]
         );
+        assert.equal(result.sessions.some((session) =>
+            session.transcript || session.metadata
+        ), false);
         const runtimeEntry = manager.runtimes.values().next().value;
         assert.deepEqual(runtimeEntry.runtime.listRequests, [
             {
@@ -1238,6 +1243,53 @@ describe('AcpManager', () => {
         assert.equal(getPersistedTabs().length, 1);
         const runtimeEntry = manager.runtimes.values().next().value;
         assert.deepEqual(runtimeEntry.runtime.resumedTabs, ['hist-1']);
+    });
+
+    it('returns a compact window when reusing an existing open ACP session', async () => {
+        const { manager } = createManager();
+        const first = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-1'
+        });
+        const runtimeEntry = manager.runtimes.values().next().value;
+        const runtimeTab = runtimeEntry.runtime.tabs.get(first.id);
+        runtimeTab.messages = Array.from({ length: 50 }, (_, index) => ({
+            id: `message-${index}`,
+            streamKey: `message-${index}`,
+            role: 'assistant',
+            kind: 'message',
+            text: `message ${index}`,
+            order: index + 1
+        }));
+        runtimeTab.toolCalls = [{
+            toolCallId: 'tool-large',
+            order: 51,
+            rawOutput: { stdout: 'large output' },
+            content: [{
+                type: 'diff',
+                path: '/tmp/file.txt',
+                newText: 'large diff'
+            }]
+        }];
+
+        const second = await manager.resumeTab({
+            agentId: 'codex',
+            cwd: '/tmp/other-project',
+            terminalSessionId: 'term-2',
+            sessionId: first.acpSessionId,
+            title: 'Duplicate open'
+        });
+
+        assert.equal(second.id, first.id);
+        assert.equal(second.messages.length, 29);
+        assert.equal(second.toolCalls.length, 1);
+        assert.equal(second.timelineWindow.total, 51);
+        assert.equal(second.toolCalls[0].rawOutput, undefined);
+        assert.deepEqual(second.toolCalls[0].content, [{
+            type: 'diff',
+            path: '/tmp/file.txt'
+        }]);
     });
 
     it('coalesces concurrent resume requests for the same ACP session', async () => {
@@ -2149,6 +2201,11 @@ describe('AcpManager', () => {
                 () => events.find((event) => event.type === 'permission_request')
             );
             assert.ok(permissionEvent.permission.id);
+            assert.equal(permissionEvent.permission.detailsAvailable, true);
+            assert.equal(
+                permissionEvent.permission.toolCall?.rawOutput,
+                undefined
+            );
 
             const runningTab = await waitForValue(async () => {
                 const state = await manager.listState();
@@ -2707,10 +2764,54 @@ describe('AcpManager', () => {
             assert.equal(settledTab.terminals.length, 1);
             assert.equal(settledTab.terminals[0].released, true);
             assert.equal(settledTab.terminals[0].terminalSessionId, '');
+            assert.equal(settledTab.terminals[0].output, undefined);
+            const terminalTool = settledTab.toolCalls.find((entry) =>
+                Array.isArray(entry.content)
+                && entry.content.some((item) => item?.type === 'terminal')
+            );
+            const detail = manager.getTabToolDetail(
+                tab.id,
+                terminalTool?.toolCallId
+            );
             assert.match(
-                settledTab.terminals[0].output || '',
+                detail?.terminals?.[0]?.output || '',
                 /alpha[\s\S]*beta/
             );
+            const diffDetail = manager.getTabToolDetail(
+                tab.id,
+                terminalTool?.toolCallId,
+                { include: 'diff' }
+            );
+            assert.equal(diffDetail.complete, false);
+            assert.equal(diffDetail.terminals.length, 0);
+            assert.equal(diffDetail.toolCall.rawOutput, undefined);
+            assert.equal(diffDetail.toolCall.content.every((item) =>
+                item.type === 'diff'
+            ), true);
+            const toolEvents = events.filter((event) => (
+                event.type === 'session_update'
+                && (
+                    event.update?.sessionUpdate === 'tool_call'
+                    || event.update?.sessionUpdate === 'tool_call_update'
+                )
+            ));
+            assert.ok(toolEvents.length > 0);
+            assert.equal(toolEvents.some((event) =>
+                event.update?.rawOutput !== undefined
+            ), false);
+            assert.equal(toolEvents.every((event) =>
+                event.update?.detailsAvailable === true
+            ), true);
+            assert.equal(toolEvents.some((event) =>
+                (event.update?.content || []).some((item) =>
+                    item?.type === 'diff' && typeof item.newText === 'string'
+                )
+            ), false);
+            assert.equal(toolEvents.some((event) =>
+                event.tab?.availableCommands
+                || event.tab?.availableModes
+                || event.tab?.configOptions
+            ), false);
             assert.ok(events.some((event) => (
                 event.type === 'session_update'
                 && event.update?.sessionUpdate === 'session_info_update'
