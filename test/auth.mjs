@@ -268,7 +268,7 @@ describe('auth token lifecycle', () => {
                         `${auth.WEBSOCKET_AUTH_PROTOCOL_PREFIX}${token}`
                     ].join(', ')
                 },
-                url: '/ws/session-1'
+                url: '/ws/client'
             }),
             token
         );
@@ -281,7 +281,7 @@ describe('auth token lifecycle', () => {
                         `${auth.WEBSOCKET_AUTH_PROTOCOL_PREFIX}ignored`
                     ].join(', ')
                 },
-                url: '/ws/session-1?token=ignored'
+                url: '/ws/client?token=ignored'
             }),
             token
         );
@@ -290,7 +290,7 @@ describe('auth token lifecycle', () => {
                 headers: {
                     host: '127.0.0.1:9846'
                 },
-                url: `/ws/session-1?token=${encodeURIComponent(token)}`
+                url: `/ws/client?token=${encodeURIComponent(token)}`
             }),
             token
         );

@@ -1650,7 +1650,7 @@ describe('AcpManager', () => {
         assert.equal(state.restoring, true);
     });
 
-    it('returns only agent tab ids in heartbeat inventory', async () => {
+    it('returns only agent tab ids in client inventory', async () => {
         const { manager } = createManager();
         manager.restoring = true;
         const tab = await manager.createTab({
@@ -1659,7 +1659,7 @@ describe('AcpManager', () => {
             terminalSessionId: 'term-1'
         });
 
-        const inventory = manager.listHeartbeatInventory();
+        const inventory = manager.listClientInventory();
 
         assert.deepEqual(inventory, {
             restoring: true,

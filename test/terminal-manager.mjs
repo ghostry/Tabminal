@@ -131,7 +131,7 @@ describe('TerminalManager workspace sync', () => {
         assert.deepEqual(listed[0].editorState, workspaceState);
     });
 
-    it('returns minimal session state for heartbeat listings', () => {
+    it('returns minimal session state for client listings', () => {
         const manager = new TerminalManager();
         manager.sessions.set('session-4', {
             id: 'session-4',
@@ -164,7 +164,7 @@ describe('TerminalManager workspace sync', () => {
             executions: []
         });
 
-        const listed = manager.listHeartbeatSessions();
+        const listed = manager.listClientSessions();
         assert.deepEqual(listed, [
             {
                 id: 'session-4',

@@ -2910,6 +2910,13 @@ kbd {
     word-break: break-word;
 }
 
+.agent-tool-call.kind-edit .agent-tool-call-summary {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    word-break: normal;
+}
+
 .agent-tool-call-body {
     margin: 6px 0 0;
     white-space: pre-wrap;

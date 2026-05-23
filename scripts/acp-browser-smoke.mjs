@@ -115,21 +115,6 @@ async function getJsonWithAuth(url, token) {
     return await response.json();
 }
 
-async function postJsonWithAuth(url, token, body) {
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            authorization: token || '',
-            'content-type': 'application/json'
-        },
-        body: JSON.stringify(body)
-    });
-    if (!response.ok) {
-        throw new Error(`${url} -> ${response.status}`);
-    }
-    return await response.json();
-}
-
 let authStatePromise = null;
 
 function buildLoginChallengeResponse(challenge) {
@@ -1994,69 +1979,19 @@ async function main() {
         if (expectManagedTerminalUi) {
             let lastManagedTerminalLiveState = null;
             await waitFor('managed-terminal-session-live', async () => {
-                let heartbeatSessions = [];
-                let managedHeartbeatCount = 0;
-                try {
-                    const heartbeat = await postJsonWithAuth(
-                        new URL('/api/heartbeat', tabminalUrl),
-                        tabminalAuthToken,
-                        { updates: { sessions: [] } }
-                    );
-                    heartbeatSessions = Array.isArray(heartbeat?.sessions)
-                        ? heartbeat.sessions
-                        : [];
-                    managedHeartbeatCount = heartbeatSessions.filter(
-                        (session) => session?.managed?.kind === 'agent-terminal'
-                    ).length;
-                } catch {
-                    heartbeatSessions = [];
-                    managedHeartbeatCount = 0;
-                }
                 const liveUiState = await evaluate(
                     toExpression(`
                         async () => {
-                            const heartbeatSessions = ${JSON.stringify(
-                                heartbeatSessions
-                            )};
+                            let syncResult = null;
                             if (
                                 window.__tabminalSmoke
                                 && typeof window.__tabminalSmoke
-                                    .applyMainServerSessions
+                                    .syncMainServerSessions
                                     === 'function'
                             ) {
                                 try {
-                                    const result = await window.__tabminalSmoke
-                                        .applyMainServerSessions(
-                                            heartbeatSessions
-                                        );
-                                    if (result && typeof result === 'object') {
-                                        const managedTabs = Array.from(
-                                            document.querySelectorAll(
-                                                '.tab-item.agent-managed-session'
-                                            )
-                                        );
-                                        return {
-                                            hasManagedSessionState:
-                                                Array.isArray(
-                                                    result.managedSessionKeys
-                                                ) && result.managedSessionKeys
-                                                    .length > 0,
-                                            hasMatchingManagedSession:
-                                                managedTabs.length > 0,
-                                            hasManagedBadge: managedTabs.some(
-                                                (node) => /MANAGED:/i.test(
-                                                    node.textContent || ''
-                                                )
-                                            ),
-                                            managedSessionCount: managedTabs
-                                                .length,
-                                            hasOpenButton: Boolean(
-                                                document.querySelector(
-                                                    '.agent-tool-call-terminal-open'
-                                                )
-                                            )
-                                        };
-                                    }
+                                    syncResult = await window.__tabminalSmoke
+                                        .syncMainServerSessions();
                         } catch {
                             // Ignore in-page sync failures during polling.
                         }
@@ -2076,6 +2011,13 @@ async function main() {
                             );
                             return {
                                 hasManagedSessionState:
+                                    (
+                                        Array.isArray(
+                                            syncResult?.managedSessionKeys
+                                        )
+                                        && syncResult.managedSessionKeys.length > 0
+                                    )
+                                    ||
                                     managedSessionKeys.length > 0,
                                 hasMatchingManagedSession:
                                     managedTabs.length > 0,
@@ -2095,11 +2037,9 @@ async function main() {
                     `)
                 );
                 lastManagedTerminalLiveState = {
-                    managedHeartbeatCount,
                     liveUiState
                 };
-                return managedHeartbeatCount > 0
-                    && liveUiState?.hasManagedSessionState
+                return liveUiState?.hasManagedSessionState
                     && liveUiState?.hasMatchingManagedSession
                     && liveUiState?.hasManagedBadge
                     && Number(liveUiState?.managedSessionCount || 0) > 0;

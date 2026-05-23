@@ -14,6 +14,22 @@ import * as persistence from './persistence.mjs';
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
 const CLIENT_TIMELINE_INITIAL_LIMIT = 30;
+const COMPACT_TOOL_INPUT_STRING_LIMIT = 240;
+const COMPACT_TOOL_INPUT_ARRAY_LIMIT = 20;
+
+function compactString(value, limit = COMPACT_TOOL_INPUT_STRING_LIMIT) {
+    const text = typeof value === 'string' ? value : '';
+    if (!text || text.length <= limit) return text;
+    return `${text.slice(0, limit)}...`;
+}
+
+function compactStringArray(values = []) {
+    if (!Array.isArray(values)) return [];
+    return values
+        .filter((value) => typeof value === 'string' && value)
+        .slice(0, COMPACT_TOOL_INPUT_ARRAY_LIMIT)
+        .map((value) => compactString(value));
+}
 
 function compactTerminalSummary(summary = {}) {
     const next = cloneSerializable(summary, {}) || {};
@@ -50,9 +66,61 @@ function compactToolContentItem(item = {}) {
     return cloneSerializable(item, {});
 }
 
+function compactRawInput(rawInput = null) {
+    if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+        return rawInput;
+    }
+    const next = {};
+    for (const key of [
+        'path',
+        'cwd',
+        'workdir',
+        'query',
+        'pattern',
+        'search'
+    ]) {
+        if (typeof rawInput[key] === 'string' && rawInput[key]) {
+            next[key] = compactString(rawInput[key]);
+        }
+    }
+    if (Array.isArray(rawInput.paths)) {
+        next.paths = compactStringArray(rawInput.paths);
+    }
+    if (typeof rawInput.cmd === 'string' && rawInput.cmd) {
+        next.cmd = compactString(rawInput.cmd);
+    }
+    if (typeof rawInput.command === 'string' && rawInput.command) {
+        next.command = compactString(rawInput.command);
+    } else if (Array.isArray(rawInput.command)) {
+        next.command = compactStringArray(rawInput.command);
+    }
+    if (rawInput.changes && typeof rawInput.changes === 'object') {
+        next.changes = Object.fromEntries(
+            Object.keys(rawInput.changes)
+                .slice(0, COMPACT_TOOL_INPUT_ARRAY_LIMIT)
+                .map((key) => [key, true])
+        );
+        const changeCount = Object.keys(rawInput.changes).length;
+        if (changeCount > COMPACT_TOOL_INPUT_ARRAY_LIMIT) {
+            next.changesTruncated = changeCount - COMPACT_TOOL_INPUT_ARRAY_LIMIT;
+        }
+    }
+    if (Object.keys(next).length > 0) {
+        next.compacted = true;
+        return next;
+    }
+    return {
+        compacted: true,
+        keys: Object.keys(rawInput).slice(0, COMPACT_TOOL_INPUT_ARRAY_LIMIT)
+    };
+}
+
 function compactToolCall(toolCall = {}) {
     const next = cloneSerializable(toolCall, {}) || {};
     delete next.rawOutput;
+    if (next.rawInput) {
+        next.rawInput = compactRawInput(next.rawInput);
+    }
     next.content = Array.isArray(next.content)
         ? next.content.map((item) => compactToolContentItem(item))
         : [];
@@ -3207,17 +3275,19 @@ class AcpRuntime extends EventEmitter {
         ));
     }
 
-    attachSocket(tabId, socket) {
+    attachSocket(tabId, socket, options = {}) {
         const tab = this.tabs.get(tabId);
         if (!tab) {
             socket.close();
             return false;
         }
         tab.clients.add(socket);
-        socket.send(JSON.stringify({
-            type: 'snapshot',
-            tab: this.serializeTabWindow(tab)
-        }));
+        if (options.snapshot !== false) {
+            socket.send(JSON.stringify({
+                type: 'snapshot',
+                tab: this.serializeTabWindow(tab)
+            }));
+        }
         socket.on('close', () => {
             tab.clients.delete(socket);
         });
@@ -4161,8 +4231,9 @@ class AcpRuntime extends EventEmitter {
     }
 }
 
-export class AcpManager {
+export class AcpManager extends EventEmitter {
     constructor(options = {}) {
+        super();
         this.idleTimeoutMs = options.idleTimeoutMs || DEFAULT_IDLE_TIMEOUT_MS;
         this.terminalManager = options.terminalManager || null;
         this.runtimeFactory = options.runtimeFactory || (
@@ -4205,6 +4276,10 @@ export class AcpManager {
 
     #markDefinitionsChanged() {
         this.definitionsRevision = this.#nextStateRevision();
+        this.emit('state_changed', {
+            kind: 'definitions',
+            revision: this.stateRevision
+        });
     }
 
     #markTabChanged(tabId) {
@@ -4212,6 +4287,11 @@ export class AcpManager {
         if (!id) return;
         this.deletedTabRevisions.delete(id);
         this.tabRevisions.set(id, this.#nextStateRevision());
+        this.emit('state_changed', {
+            kind: 'tab',
+            tabId: id,
+            revision: this.stateRevision
+        });
     }
 
     #markTabDeleted(tabId) {
@@ -4219,6 +4299,11 @@ export class AcpManager {
         if (!id) return;
         this.tabRevisions.delete(id);
         this.deletedTabRevisions.set(id, this.#nextStateRevision());
+        this.emit('state_changed', {
+            kind: 'tab_deleted',
+            tabId: id,
+            revision: this.stateRevision
+        });
     }
 
     #getDefinitionAvailabilityOverride(agentId) {
@@ -4792,7 +4877,7 @@ export class AcpManager {
         };
     }
 
-    listHeartbeatInventory() {
+    listClientInventory() {
         return {
             restoring: this.restoring,
             tabs: Array.from(this.tabs.keys())
@@ -5218,13 +5303,13 @@ export class AcpManager {
         }
     }
 
-    attachSocket(tabId, socket) {
+    attachSocket(tabId, socket, options = {}) {
         const tabEntry = this.tabs.get(tabId);
         if (!tabEntry) {
             socket.close();
             return false;
         }
-        return tabEntry.runtime.attachSocket(tabId, socket);
+        return tabEntry.runtime.attachSocket(tabId, socket, options);
     }
 
     async sendPrompt(tabId, text, attachments = []) {

@@ -5,7 +5,9 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import net from 'node:net';
+import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
 
 import Koa from 'koa';
 import serve from 'koa-static';
@@ -33,6 +35,7 @@ import {
 } from './auth.mjs';
 import {
     setupFsRoutes,
+    readTextFileSnapshot,
     writeTextFileSnapshot
 } from './fs-routes.mjs';
 import * as persistence from './persistence.mjs';
@@ -337,86 +340,6 @@ setupFsRoutes(router);
 router.get('/api/system', (ctx) => {
     ctx.body = {
         system: systemMonitor.getStaticInfo()
-    };
-});
-
-router.all('/api/heartbeat', async (ctx) => {
-    const fileWriteResults = [];
-    if (ctx.method === 'POST') {
-        const { updates } = ctx.request.body;
-        if (updates && updates.sessions) {
-            for (const update of updates.sessions) {
-                const session = terminalManager.getSession(update.id);
-                if (session) {
-                    if (update.resize) {
-                        const { cols, rows } = update.resize;
-                        if (cols && rows) session.resize(cols, rows);
-                    }
-                    if (update.workspaceState || update.editorState) {
-                        terminalManager.updateSessionState(session.id, {
-                            workspaceState: update.workspaceState,
-                            editorState: update.editorState
-                        });
-                    }
-                    if (update.fileWrites) {
-                        const sessionResults = [];
-                        for (const file of update.fileWrites) {
-                            try {
-                                const snapshot = await writeTextFileSnapshot(
-                                    file.path,
-                                    file.content,
-                                    file.expectedVersion,
-                                    file.force === true
-                                );
-                                sessionResults.push({
-                                    path: file.path,
-                                    status: 'ok',
-                                    version: snapshot.version,
-                                    readonly: snapshot.readonly
-                                });
-                            } catch (e) {
-                                if (e?.status === 409) {
-                                    sessionResults.push({
-                                        path: file.path,
-                                        status: 'conflict',
-                                        version: e.snapshot?.version || '',
-                                        content: e.snapshot?.content || '',
-                                        readonly: !!e.snapshot?.readonly,
-                                        error: e.message
-                                    });
-                                    continue;
-                                }
-                                console.error(
-                                    `[Heartbeat] Write failed: ${file.path}`,
-                                    e
-                                );
-                                sessionResults.push({
-                                    path: file.path,
-                                    status: 'error',
-                                    error: e?.message || 'Write failed'
-                                });
-                            }
-                        }
-                        if (sessionResults.length > 0) {
-                            fileWriteResults.push({
-                                id: update.id,
-                                fileWrites: sessionResults
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    ctx.body = {
-        sessions: terminalManager.listHeartbeatSessions(),
-        agents: acpManager.listHeartbeatInventory(),
-        fileWriteResults,
-        system: systemMonitor.getStats(),
-        runtime: {
-            bootId: SERVER_BOOT_ID
-        }
     };
 });
 
@@ -864,6 +787,467 @@ const wss = new WebSocketServer({
     }
 });
 const httpConnections = new Set();
+const WS_STATE_OPEN = 1;
+
+function serializeSessionSummary(session) {
+    if (!session) return null;
+    return {
+        id: session.id,
+        closed: !!session.closed,
+        ...(session.exitStatus ? { exitStatus: session.exitStatus } : {}),
+        ...(session.managed ? { managed: session.managed } : {})
+    };
+}
+
+function safeSendJson(socket, message) {
+    if (!socket || socket.readyState !== WS_STATE_OPEN) return false;
+    socket.send(JSON.stringify(message));
+    return true;
+}
+
+class RoutedSocket extends EventEmitter {
+    constructor(parent, scope, id) {
+        super();
+        this.parent = parent;
+        this.scope = scope;
+        this.id = id;
+    }
+
+    get readyState() {
+        return this.parent.socket.readyState;
+    }
+
+    send(message) {
+        if (this.readyState !== WS_STATE_OPEN) return;
+        let payload = message;
+        if (typeof message === 'string') {
+            try {
+                payload = JSON.parse(message);
+            } catch {
+                payload = message;
+            }
+        }
+        this.parent.send({
+            scope: this.scope,
+            id: this.id,
+            type: `${this.scope}.message`,
+            payload
+        });
+    }
+
+    close() {
+        this.emit('close');
+    }
+}
+
+class HostClientConnection {
+    constructor(socket) {
+        this.socket = socket;
+        this.terminals = new Map();
+        this.agents = new Map();
+        this.fileTreeWatchers = new Map();
+        this.fileVersionWatchers = new Map();
+        this.sessionSummaries = new Map();
+        this.systemTimer = null;
+        this.disposed = false;
+        this.lastAgentRevision = 0;
+
+        this.boundSessionCreated = (session) => {
+            this.pushSessionSummary(session, { force: true });
+        };
+        this.boundSessionUpdated = (session) => {
+            this.pushSessionSummary(session);
+        };
+        this.boundSessionRemoved = ({ id }) => {
+            this.send({
+                type: 'session.remove',
+                id
+            });
+        };
+        this.boundAgentChanged = () => {
+            this.pushAgentState();
+        };
+    }
+
+    start() {
+        this.socket.on('message', (raw) => this.handleMessage(raw));
+        this.socket.once('close', () => this.dispose());
+        this.socket.on('error', () => this.dispose());
+        terminalManager.on('session_created', this.boundSessionCreated);
+        terminalManager.on('session_updated', this.boundSessionUpdated);
+        terminalManager.on('session_removed', this.boundSessionRemoved);
+        acpManager.on('state_changed', this.boundAgentChanged);
+        this.systemTimer = setInterval(() => {
+            this.send({
+                type: 'system.stats',
+                system: systemMonitor.getStats()
+            });
+        }, 1000);
+        this.systemTimer.unref?.();
+        void this.sendHello();
+    }
+
+    send(message) {
+        return safeSendJson(this.socket, message);
+    }
+
+    async sendHello() {
+        this.send({
+            type: 'server.hello',
+            runtime: { bootId: SERVER_BOOT_ID },
+            sessions: terminalManager.listClientSessions(),
+            agents: await acpManager.listState({ full: true }),
+            system: systemMonitor.getStats()
+        });
+        for (const session of terminalManager.sessions.values()) {
+            this.rememberSessionSummary(session);
+        }
+        this.lastAgentRevision = acpManager.stateRevision || 0;
+    }
+
+    async pushAgentState() {
+        try {
+            const agents = await acpManager.listState({
+                full: false,
+                since: this.lastAgentRevision
+            });
+            if (
+                agents
+                && Array.isArray(agents.tabs)
+                && agents.tabs.length === 0
+                && Array.isArray(agents.removedTabs)
+                && agents.removedTabs.length === 0
+                && !Array.isArray(agents.definitions)
+                && !Array.isArray(agents.configs)
+            ) {
+                this.lastAgentRevision = Math.max(
+                    this.lastAgentRevision,
+                    Number.isFinite(agents.revision) ? agents.revision : 0
+                );
+                return;
+            }
+            this.send({
+                type: 'agent.inventory',
+                agents
+            });
+            if (Number.isFinite(agents?.revision)) {
+                this.lastAgentRevision = Math.max(
+                    this.lastAgentRevision,
+                    agents.revision
+                );
+            }
+        } catch {
+            // Ignore transient agent inventory failures.
+        }
+    }
+
+    rememberSessionSummary(session) {
+        const summary = serializeSessionSummary(session);
+        if (!summary) return null;
+        this.sessionSummaries.set(summary.id, JSON.stringify(summary));
+        return summary;
+    }
+
+    pushSessionSummary(session, { force = false } = {}) {
+        const summary = serializeSessionSummary(session);
+        if (!summary) return;
+        const encoded = JSON.stringify(summary);
+        if (!force && this.sessionSummaries.get(summary.id) === encoded) {
+            return;
+        }
+        this.sessionSummaries.set(summary.id, encoded);
+        this.send({
+            type: 'session.upsert',
+            session: summary
+        });
+    }
+
+    attachTerminal(sessionId) {
+        const id = String(sessionId || '').trim();
+        if (!id || this.terminals.has(id)) return;
+        const session = terminalManager.getSession(id);
+        if (!session) {
+            this.send({ type: 'session.remove', id });
+            return;
+        }
+        const routed = new RoutedSocket(this, 'terminal', id);
+        this.terminals.set(id, routed);
+        session.attach(routed);
+    }
+
+    detachTerminal(sessionId) {
+        const id = String(sessionId || '').trim();
+        const routed = this.terminals.get(id);
+        if (!routed) return;
+        routed.close();
+        this.terminals.delete(id);
+    }
+
+    attachAgent(tabId) {
+        const id = String(tabId || '').trim();
+        if (!id || this.agents.has(id)) return;
+        const routed = new RoutedSocket(this, 'agent', id);
+        if (acpManager.attachSocket(id, routed, { snapshot: false })) {
+            this.agents.set(id, routed);
+        }
+    }
+
+    detachAgent(tabId) {
+        const id = String(tabId || '').trim();
+        const routed = this.agents.get(id);
+        if (!routed) return;
+        routed.close();
+        this.agents.delete(id);
+    }
+
+    handleRoutedPayload(message) {
+        const scope = String(message?.scope || '');
+        const id = String(message?.id || '');
+        const payload = message?.payload;
+        if (!scope || !id || !payload) return;
+        const target = scope === 'terminal'
+            ? this.terminals.get(id)
+            : scope === 'agent'
+                ? this.agents.get(id)
+                : null;
+        if (target) {
+            target.emit('message', JSON.stringify(payload));
+        }
+    }
+
+    handleSessionPatch(message) {
+        const id = String(message?.id || '').trim();
+        const payload = message?.payload || {};
+        if (!id) return;
+        const session = terminalManager.getSession(id);
+        if (session && payload.resize) {
+            const { cols, rows } = payload.resize;
+            if (cols && rows) session.resize(cols, rows);
+        }
+        if (payload.workspaceState || payload.editorState) {
+            terminalManager.updateSessionState(id, {
+                workspaceState: payload.workspaceState,
+                editorState: payload.editorState
+            });
+        }
+    }
+
+    async handleFileWrite(message) {
+        const payload = message?.payload || {};
+        const sessionId = String(message?.id || payload.sessionId || '').trim();
+        const filePath = String(payload.path || '').trim();
+        if (!sessionId || !filePath || typeof payload.content !== 'string') return;
+        try {
+            const snapshot = await writeTextFileSnapshot(
+                filePath,
+                payload.content,
+                payload.expectedVersion || '',
+                payload.force === true
+            );
+            this.send({
+                type: 'file.writeResult',
+                id: sessionId,
+                fileWrites: [{
+                    path: filePath,
+                    status: 'ok',
+                    version: snapshot.version,
+                    readonly: snapshot.readonly
+                }]
+            });
+        } catch (error) {
+            if (error?.status === 409) {
+                this.send({
+                    type: 'file.writeResult',
+                    id: sessionId,
+                    fileWrites: [{
+                        path: filePath,
+                        status: 'conflict',
+                        version: error.snapshot?.version || '',
+                        content: error.snapshot?.content || '',
+                        readonly: !!error.snapshot?.readonly,
+                        error: error.message
+                    }]
+                });
+                return;
+            }
+            this.send({
+                type: 'file.writeResult',
+                id: sessionId,
+                fileWrites: [{
+                    path: filePath,
+                    status: 'error',
+                    error: error?.message || 'Write failed'
+                }]
+            });
+        }
+    }
+
+    watchFileTree(message) {
+        const dirPath = String(message?.payload?.path || message?.id || '').trim();
+        if (!dirPath || this.fileTreeWatchers.has(dirPath)) return;
+        let timer = null;
+        try {
+            const watcher = fs.watch(path.resolve(process.cwd(), dirPath), () => {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    this.send({
+                        type: 'file.tree.changed',
+                        path: dirPath,
+                        version: `${Date.now()}`
+                    });
+                }, 200);
+            });
+            this.fileTreeWatchers.set(dirPath, {
+                watcher,
+                close: () => {
+                    clearTimeout(timer);
+                    watcher.close();
+                }
+            });
+        } catch (error) {
+            this.send({
+                type: 'file.watch.error',
+                path: dirPath,
+                error: error?.message || 'Unable to watch directory'
+            });
+        }
+    }
+
+    unwatchFileTree(message) {
+        const dirPath = String(message?.payload?.path || message?.id || '').trim();
+        const entry = this.fileTreeWatchers.get(dirPath);
+        if (!entry) return;
+        entry.close();
+        this.fileTreeWatchers.delete(dirPath);
+    }
+
+    watchFileVersion(message) {
+        const filePath = String(message?.payload?.path || message?.id || '').trim();
+        if (!filePath || this.fileVersionWatchers.has(filePath)) return;
+        let timer = null;
+        const push = async () => {
+            try {
+                const snapshot = await readTextFileSnapshot(
+                    path.resolve(process.cwd(), filePath)
+                );
+                this.send({
+                    type: 'file.version.changed',
+                    path: filePath,
+                    version: snapshot.version,
+                    readonly: snapshot.readonly,
+                    deleted: false
+                });
+            } catch (error) {
+                if (error?.status === 404) {
+                    this.send({
+                        type: 'file.version.changed',
+                        path: filePath,
+                        version: '',
+                        readonly: false,
+                        deleted: true
+                    });
+                    return;
+                }
+                this.send({
+                    type: 'file.watch.error',
+                    path: filePath,
+                    error: error?.message || 'Unable to watch file'
+                });
+            }
+        };
+        try {
+            const watcher = fs.watch(path.resolve(process.cwd(), filePath), () => {
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    void push();
+                }, 200);
+            });
+            this.fileVersionWatchers.set(filePath, {
+                watcher,
+                close: () => {
+                    clearTimeout(timer);
+                    watcher.close();
+                }
+            });
+        } catch (error) {
+            this.send({
+                type: 'file.watch.error',
+                path: filePath,
+                error: error?.message || 'Unable to watch file'
+            });
+        }
+    }
+
+    unwatchFileVersion(message) {
+        const filePath = String(message?.payload?.path || message?.id || '').trim();
+        const entry = this.fileVersionWatchers.get(filePath);
+        if (!entry) return;
+        entry.close();
+        this.fileVersionWatchers.delete(filePath);
+    }
+
+    handleMessage(raw) {
+        let message;
+        try {
+            message = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8'));
+        } catch {
+            return;
+        }
+        switch (message.type) {
+            case 'subscribe':
+                if (message.scope === 'terminal') this.attachTerminal(message.id);
+                if (message.scope === 'agent') this.attachAgent(message.id);
+                break;
+            case 'unsubscribe':
+                if (message.scope === 'terminal') this.detachTerminal(message.id);
+                if (message.scope === 'agent') this.detachAgent(message.id);
+                break;
+            case 'terminal.input':
+            case 'terminal.resize':
+            case 'terminal.claim':
+            case 'agent.message':
+                this.handleRoutedPayload(message);
+                break;
+            case 'session.patch':
+                this.handleSessionPatch(message);
+                break;
+            case 'file.write':
+                void this.handleFileWrite(message);
+                break;
+            case 'file.tree.watch':
+                this.watchFileTree(message);
+                break;
+            case 'file.tree.unwatch':
+                this.unwatchFileTree(message);
+                break;
+            case 'file.version.watch':
+                this.watchFileVersion(message);
+                break;
+            case 'file.version.unwatch':
+                this.unwatchFileVersion(message);
+                break;
+        }
+    }
+
+    dispose() {
+        if (this.disposed) return;
+        this.disposed = true;
+        clearInterval(this.systemTimer);
+        terminalManager.off('session_created', this.boundSessionCreated);
+        terminalManager.off('session_updated', this.boundSessionUpdated);
+        terminalManager.off('session_removed', this.boundSessionRemoved);
+        acpManager.off('state_changed', this.boundAgentChanged);
+        for (const routed of this.terminals.values()) routed.close();
+        for (const routed of this.agents.values()) routed.close();
+        for (const entry of this.fileTreeWatchers.values()) entry.close();
+        for (const entry of this.fileVersionWatchers.values()) entry.close();
+        this.terminals.clear();
+        this.agents.clear();
+        this.sessionSummaries.clear();
+        this.fileTreeWatchers.clear();
+        this.fileVersionWatchers.clear();
+    }
+}
 
 httpServer.on('connection', (socket) => {
     httpConnections.add(socket);
@@ -876,41 +1260,10 @@ httpServer.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
     const pathname = url.pathname;
 
-    if (pathname.startsWith('/ws/agents/')) {
-        const match = pathname.match(/^\/ws\/agents\/([a-zA-Z0-9-]+)$/);
-        if (!match) {
-            socket.destroy();
-            return;
-        }
-
-        const tabId = match[1];
+    if (pathname === '/ws/client') {
         wss.handleUpgrade(request, socket, head, (ws) => {
             wss.emit('connection', ws, {
-                kind: 'agent',
-                tabId
-            });
-        });
-    } else if (pathname.startsWith('/ws/')) {
-        const match = pathname.match(/^\/ws\/([a-zA-Z0-9-]+)$/);
-        if (!match) {
-            socket.destroy();
-            return;
-        }
-
-        const sessionId = match[1];
-
-        wss.handleUpgrade(request, socket, head, (ws) => {
-            const session = terminalManager.getSession(sessionId);
-            if (!session) {
-                console.warn(`[Server] Session not found for ID: ${sessionId}`);
-                ws.close(); // Close the WebSocket connection
-                return;
-            }
-            const ua = request.headers['user-agent'] || 'Unknown';
-            wss.emit('connection', ws, {
-                kind: 'terminal',
-                session,
-                ua
+                kind: 'client'
             });
         });
     } else {
@@ -923,19 +1276,11 @@ wss.on('connection', (socket, target) => {
     socket.on('pong', () => {
         socket.isAlive = true;
     });
-    if (target.kind === 'terminal') {
-        debugLog(
-            `[Server] WebSocket connected to session `
-            + `${target.session.id} [${target.ua}]`
-        );
-        target.session.attach(socket);
+    if (target.kind === 'client') {
+        debugLog('[Server] WebSocket connected to host client');
+        const client = new HostClientConnection(socket);
+        client.start();
         return;
-    }
-    if (target.kind === 'agent') {
-        debugLog(
-            `[Server] WebSocket connected to agent tab ${target.tabId}`
-        );
-        acpManager.attachSocket(target.tabId, socket);
     }
 });
 

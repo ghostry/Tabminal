@@ -135,14 +135,11 @@ const editorPane = document.getElementById('editor-pane');
 // #endregion
 
 // #region Configuration
-const HEARTBEAT_INTERVAL_MS = 10000;
-const RECONNECT_RETRY_MS = 5000;
-const FILE_TREE_REFRESH_INTERVAL_MS = 10000;
-const FILE_VERSION_CHECK_INTERVAL_MS = 10000;
 const TERMINAL_HISTORY_LOAD_CHARS = 96 * 24;
 const AGENT_TRANSCRIPT_INITIAL_VISIBLE_BLOCKS = 30;
 const AGENT_TRANSCRIPT_WINDOW_STEP = 10;
 const AGENT_TRANSCRIPT_FOLLOW_LATEST_TOLERANCE = 5;
+const HOST_SOCKET_RECONNECT_MS = 5000;
 const AGENT_TRANSCRIPT_RENDER_DEBOUNCE_MS = 300;
 const WORKSPACE_TAB_TITLE_MAX_LENGTH = 20;
 const MAIN_SERVER_ID = 'main';
@@ -775,7 +772,7 @@ if (sidebarToggle && sidebar && sidebarOverlay) {
 // #endregion
 
 // #region Auth and Server Client
-async function probeAccessLoginUrl(server, path = '/api/heartbeat') {
+async function probeAccessLoginUrl(server, path = '/api/system') {
     if (!server || server.isPrimary) return '';
     try {
         const response = await fetch(server.resolveUrl(path), {
@@ -938,6 +935,434 @@ function isIsoExpired(value, leewayMs = 0) {
     return timestamp <= (Date.now() + leewayMs);
 }
 
+class HostSocket {
+    constructor(server) {
+        this.server = server;
+        this.socket = null;
+        this.connectPromise = null;
+        this.helloResolved = false;
+        this.helloResolve = null;
+        this.terminalSessions = new Map();
+        this.agentTabs = new Map();
+        this.fileTreeWatches = new Set();
+        this.fileVersionWatches = new Set();
+        this.reconnectTimer = null;
+        this.manualClose = false;
+    }
+
+    get readyState() {
+        return this.socket?.readyState ?? WebSocket.CLOSED;
+    }
+
+    isOpen() {
+        return this.socket?.readyState === WebSocket.OPEN;
+    }
+
+    async connect() {
+        this.manualClose = false;
+        this.clearReconnectTimer();
+        if (!this.server.isAuthenticated) return false;
+        if (this.helloResolved && this.isOpen()) return true;
+        if (this.connectPromise) return this.connectPromise;
+
+        this.connectPromise = (async () => {
+            const hasAccess = await this.server.ensureActiveAccessToken();
+            if (!hasAccess) return false;
+            if (
+                this.socket
+                && (
+                    this.socket.readyState === WebSocket.OPEN
+                    || this.socket.readyState === WebSocket.CONNECTING
+                )
+            ) {
+                return this.waitForHello();
+            }
+            this.helloResolved = false;
+            this.socket = new WebSocket(
+                this.server.resolveClientWsUrl(),
+                this.server.getWebSocketProtocols()
+            );
+            const socket = this.socket;
+            socket.addEventListener('open', () => {
+                if (this.socket !== socket) return;
+                this.clearReconnectTimer();
+                this.resubscribeAll();
+            });
+            socket.addEventListener('message', (event) => {
+                if (this.socket !== socket) return;
+                let message;
+                try {
+                    message = JSON.parse(event.data);
+                } catch {
+                    return;
+                }
+                void this.handleMessage(message);
+            });
+            socket.addEventListener('close', () => {
+                if (this.socket !== socket) return;
+                this.socket = null;
+                this.helloResolved = false;
+                if (this.manualClose) {
+                    return;
+                }
+                setStatus(this.server, 'reconnecting');
+                updateServerControlMetric(this.server);
+                this.scheduleReconnect();
+            });
+            socket.addEventListener('error', () => {
+                if (this.socket !== socket) return;
+                if (this.manualClose) {
+                    return;
+                }
+                setStatus(this.server, 'reconnecting');
+                this.scheduleReconnect();
+            });
+            const connected = await this.waitForHello();
+            if (!connected) {
+                try {
+                    this.socket?.close();
+                } catch {
+                    // Ignore close failures after failed hello.
+                }
+                window.setTimeout(() => this.scheduleReconnect(), 0);
+            }
+            return connected;
+        })().finally(() => {
+            this.connectPromise = null;
+        });
+        return this.connectPromise;
+    }
+
+    clearReconnectTimer() {
+        if (!this.reconnectTimer) return;
+        window.clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+    }
+
+    scheduleReconnect(delayMs = HOST_SOCKET_RECONNECT_MS) {
+        if (this.manualClose || !this.server.isAuthenticated) return;
+        if (this.reconnectTimer || this.connectPromise) return;
+        this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectTimer = null;
+            void this.connect().then((connected) => {
+                if (!connected) {
+                    this.scheduleReconnect();
+                }
+            }).catch(() => {
+                this.scheduleReconnect();
+            });
+        }, delayMs);
+    }
+
+    waitForHello() {
+        if (this.helloResolved) return Promise.resolve(true);
+        return new Promise((resolve) => {
+            const timeout = window.setTimeout(() => {
+                this.helloResolve = null;
+                try {
+                    if (
+                        this.socket
+                        && this.socket.readyState === WebSocket.CONNECTING
+                    ) {
+                        this.socket.close();
+                    }
+                } catch {
+                    // Ignore timeout close failures.
+                }
+                resolve(false);
+            }, 10_000);
+            this.helloResolve = (value) => {
+                window.clearTimeout(timeout);
+                resolve(value);
+            };
+        });
+    }
+
+    send(message) {
+        if (!this.isOpen()) {
+            void this.connect();
+            this.scheduleReconnect();
+            return false;
+        }
+        this.socket.send(JSON.stringify(message));
+        return true;
+    }
+
+    sendIfOpen(message) {
+        if (!this.isOpen()) {
+            return false;
+        }
+        this.socket.send(JSON.stringify(message));
+        return true;
+    }
+
+    subscribeTerminal(session) {
+        if (!session?.id) return;
+        this.terminalSessions.set(session.id, session);
+        if (this.isOpen()) {
+            this.send({
+                type: 'subscribe',
+                scope: 'terminal',
+                id: session.id
+            });
+        } else {
+            void this.connect();
+        }
+    }
+
+    unsubscribeTerminal(sessionId) {
+        const id = String(sessionId || '').trim();
+        if (!id) return;
+        this.terminalSessions.delete(id);
+        this.sendIfOpen({ type: 'unsubscribe', scope: 'terminal', id });
+    }
+
+    subscribeAgent(agentTab) {
+        if (!agentTab?.id) return;
+        this.agentTabs.set(agentTab.id, agentTab);
+        if (this.isOpen()) {
+            this.send({
+                type: 'subscribe',
+                scope: 'agent',
+                id: agentTab.id
+            });
+        } else {
+            void this.connect();
+        }
+    }
+
+    unsubscribeAgent(tabId) {
+        const id = String(tabId || '').trim();
+        if (!id) return;
+        this.agentTabs.delete(id);
+        this.sendIfOpen({ type: 'unsubscribe', scope: 'agent', id });
+    }
+
+    resubscribeAll() {
+        for (const id of this.terminalSessions.keys()) {
+            this.send({ type: 'subscribe', scope: 'terminal', id });
+        }
+        for (const id of this.agentTabs.keys()) {
+            this.send({ type: 'subscribe', scope: 'agent', id });
+        }
+        for (const path of this.fileTreeWatches) {
+            this.send({
+                type: 'file.tree.watch',
+                id: path,
+                payload: { path }
+            });
+        }
+        for (const path of this.fileVersionWatches) {
+            this.send({
+                type: 'file.version.watch',
+                id: path,
+                payload: { path }
+            });
+        }
+    }
+
+    sendTerminal(sessionId, payload) {
+        return this.send({
+            type: 'terminal.input',
+            scope: 'terminal',
+            id: sessionId,
+            payload
+        });
+    }
+
+    sendSessionPatch(sessionId, payload) {
+        return this.send({
+            type: 'session.patch',
+            id: sessionId,
+            payload
+        });
+    }
+
+    sendFileWrite(sessionId, payload) {
+        return this.send({
+            type: 'file.write',
+            id: sessionId,
+            payload
+        });
+    }
+
+    watchFileTree(path) {
+        if (!path) return;
+        this.fileTreeWatches.add(path);
+        this.send({
+            type: 'file.tree.watch',
+            id: path,
+            payload: { path }
+        });
+    }
+
+    unwatchFileTree(path) {
+        if (!path) return;
+        this.fileTreeWatches.delete(path);
+        this.sendIfOpen({
+            type: 'file.tree.unwatch',
+            id: path,
+            payload: { path }
+        });
+    }
+
+    watchFileVersion(path) {
+        if (!path) return;
+        this.fileVersionWatches.add(path);
+        this.send({
+            type: 'file.version.watch',
+            id: path,
+            payload: { path }
+        });
+    }
+
+    unwatchFileVersion(path) {
+        if (!path) return;
+        this.fileVersionWatches.delete(path);
+        this.sendIfOpen({
+            type: 'file.version.unwatch',
+            id: path,
+            payload: { path }
+        });
+    }
+
+    async handleMessage(message) {
+        switch (message.type) {
+            case 'server.hello':
+                this.handleHello(message);
+                break;
+            case 'system.stats':
+                this.handleSystemStats(message.system);
+                break;
+            case 'session.upsert':
+                if (message.session) {
+                    upsertSession(this.server, message.session);
+                }
+                break;
+            case 'session.remove':
+                removeSession(makeSessionKey(this.server.id, message.id));
+                break;
+            case 'agent.inventory':
+                await this.applyAgentState(message.agents);
+                break;
+            case 'terminal.message': {
+                const session = this.terminalSessions.get(message.id)
+                    || state.sessions.get(makeSessionKey(this.server.id, message.id));
+                session?.handleMessage(message.payload || {});
+                break;
+            }
+            case 'agent.message': {
+                const agentTab = this.agentTabs.get(message.id)
+                    || state.agentTabs.get(makeAgentTabKey(this.server.id, message.id));
+                agentTab?.handleMessage(message.payload || {});
+                break;
+            }
+            case 'file.writeResult':
+                await editorManager.applyFileWriteResults(
+                    this.server,
+                    [{
+                        id: message.id,
+                        fileWrites: message.fileWrites || []
+                    }],
+                    new Map()
+                );
+                break;
+            case 'file.tree.changed':
+                editorManager.handleWatchedTreeChanged?.(this.server, message.path);
+                break;
+            case 'file.version.changed':
+                await editorManager.handleWatchedFileVersionChanged?.(
+                    this.server,
+                    message
+                );
+                break;
+        }
+    }
+
+    handleHello(message) {
+        this.helloResolved = true;
+        this.clearReconnectTimer();
+        this.server.nextSyncAt = 0;
+        this.server.needsAccessLogin = false;
+        this.server.accessLoginUrl = '';
+        handlePrimaryRuntimeVersion(message);
+        setStatus(this.server, 'connected');
+        if (message.system) {
+            this.handleSystemStats(message.system);
+        }
+        reconcileSessions(this.server, message.sessions || []);
+        void this.applyAgentState(message.agents);
+        this.helloResolve?.(true);
+        this.helloResolve = null;
+    }
+
+    handleSystemStats(system) {
+        if (!system) return;
+        this.server.lastSystemData = mergeSystemData(
+            this.server.lastSystemData,
+            system
+        );
+        pushServerHeartbeat(this.server, this.server.lastLatency || 1);
+        updateServerControlMetric(this.server);
+        if (getActiveServer()?.id === this.server.id) {
+            updateSystemStatus(
+                this.server.lastSystemData,
+                this.server.lastLatency || 1,
+                this.server
+            );
+        }
+        renderServerControls();
+    }
+
+    async applyAgentState(data) {
+        if (!data || typeof data !== 'object') return;
+        if (Array.isArray(data.definitions)) {
+            state.agentDefinitions.set(this.server.id, data.definitions);
+        } else if (data.full) {
+            state.agentDefinitions.set(this.server.id, []);
+        }
+        const seenKeys = new Set();
+        for (const tabData of data.tabs || []) {
+            const key = makeAgentTabKey(this.server.id, tabData.id);
+            seenKeys.add(key);
+            upsertAgentTab(this.server, tabData);
+        }
+        for (const removed of Array.isArray(data.removedTabs)
+            ? data.removedTabs
+            : []) {
+            const removedId = typeof removed === 'string' ? removed : removed?.id;
+            if (removedId) {
+                removeAgentTab(makeAgentTabKey(this.server.id, removedId));
+            }
+        }
+        if (!data.restoring && data.full) {
+            for (const agentTab of getAgentTabsForServer(this.server.id)) {
+                if (seenKeys.has(agentTab.key)) continue;
+                removeAgentTab(agentTab.key);
+            }
+        }
+        if (Number.isFinite(data.revision)) {
+            this.server.agentStateRevision = Math.max(
+                this.server.agentStateRevision || 0,
+                data.revision
+            );
+        }
+        this.server.agentStateLoaded = !data.restoring;
+    }
+
+    close() {
+        try {
+            this.manualClose = true;
+            this.clearReconnectTimer();
+            this.socket?.close();
+        } catch {
+            // Ignore close failures.
+        }
+        this.socket = null;
+        this.helloResolved = false;
+    }
+}
+
 class ServerClient {
     constructor(data, { isPrimary = false } = {}) {
         this.id = data.id;
@@ -952,6 +1377,7 @@ class ServerClient {
         this.heartbeatLastUpdateTime = performance.now();
         this.heartbeatSmoothedMaxVal = 1;
         this.heartbeatTimer = null;
+        this.hostSocket = null;
         this.nextSyncAt = 0;
         this.syncPromise = null;
         this.pendingImmediateSync = false;
@@ -1031,28 +1457,14 @@ class ServerClient {
         return new URL(path, `${this.baseUrl}/`).toString();
     }
 
-    resolveWsUrl(sessionId) {
+    resolveClientWsUrl() {
         const base = new URL(this.baseUrl);
         const shouldUseSecureWs = (
             base.protocol === 'https:'
             || window.location.protocol === 'https:'
         );
         const wsProtocol = shouldUseSecureWs ? 'wss:' : 'ws:';
-        const wsUrl = new URL(`/ws/${sessionId}`, `${wsProtocol}//${base.host}`);
-        return wsUrl.toString();
-    }
-
-    resolveAgentWsUrl(tabId) {
-        const base = new URL(this.baseUrl);
-        const shouldUseSecureWs = (
-            base.protocol === 'https:'
-            || window.location.protocol === 'https:'
-        );
-        const wsProtocol = shouldUseSecureWs ? 'wss:' : 'ws:';
-        const wsUrl = new URL(
-            `/ws/agents/${tabId}`,
-            `${wsProtocol}//${base.host}`
-        );
+        const wsUrl = new URL('/ws/client', `${wsProtocol}//${base.host}`);
         return wsUrl.toString();
     }
 
@@ -1351,18 +1763,19 @@ class ServerClient {
     }
 
     startHeartbeat() {
-        if (!this.isAuthenticated || this.heartbeatTimer) return;
-        this.heartbeatTimer = setInterval(() => {
-            if (!this.syncPromise) {
-                syncServer(this);
-            }
-        }, HEARTBEAT_INTERVAL_MS);
+        if (!this.isAuthenticated) return Promise.resolve(false);
+        if (!this.hostSocket) {
+            this.hostSocket = new HostSocket(this);
+        }
+        return this.hostSocket.connect();
     }
 
     stopHeartbeat() {
-        if (!this.heartbeatTimer) return;
-        clearInterval(this.heartbeatTimer);
-        this.heartbeatTimer = null;
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+        this.hostSocket?.close();
     }
 }
 
@@ -1501,6 +1914,8 @@ class EditorManager {
         this.suppressFileWriteCapture = false;
         this.agentTranscriptResizeObserver = null;
         this.treeDirectoryFetches = new Map();
+        this.watchedTreePaths = new Set();
+        this.watchedFileVersionPaths = new Set();
         this.treeRefreshInFlight = false;
         this.treeRefreshRerunRequested = false;
         this.treeRefreshBatchQueued = false;
@@ -1515,9 +1930,6 @@ class EditorManager {
         this.agentTimestampTimer = window.setInterval(() => {
             this.refreshAgentUsageHud();
         }, 1000);
-        this.fileVersionCheckTimer = window.setInterval(() => {
-            void this.checkActiveFileVersion();
-        }, FILE_VERSION_CHECK_INTERVAL_MS);
     }
 
     isTerminalTabPinned(session = this.currentSession) {
@@ -2680,6 +3092,7 @@ class EditorManager {
                 ? this.editor.saveViewState()
                 : null;
             this.applyProgrammaticTextContent(entry, nextContent);
+            entry.userEdited = false;
             if (restoreViewState && this.editor) {
                 this.editor.restoreViewState(restoreViewState);
             }
@@ -2696,6 +3109,9 @@ class EditorManager {
             ? snapshot.mtimeMs
             : entry.mtimeMs;
         entry.lastDismissedRemoteVersion = '';
+        if (!useLocalContent) {
+            entry.userEdited = false;
+        }
         this.updateActiveEditorReadOnlyState(session, filePath, nextReadonly);
         if (
             this.currentSession?.key === session.key
@@ -2835,6 +3251,7 @@ class EditorManager {
                     entry.contentVersion = entry.version;
                     entry.readonly = !!result.readonly;
                     entry.lastDismissedRemoteVersion = '';
+                    entry.userEdited = false;
                     const hasNewerPendingWrite = !!(
                         currentWrite
                         && sentWrite
@@ -2904,52 +3321,89 @@ class EditorManager {
     }
 
     async checkActiveFileVersion() {
-        if (
-            this.fileVersionCheckPromise
-            || document.visibilityState === 'hidden'
-            || isConfirmModalOpen()
-        ) {
-            return;
-        }
+        if (document.visibilityState === 'hidden') return;
         const session = this.currentSession;
         const filePath = session?.editorState?.activeFilePath || '';
-        if (!this.isActiveTextFile(session, filePath)) {
-            return;
-        }
+        const next = new Set();
         const entry = this.getTextFileEntry(filePath, session);
-        if (!entry || entry.readonly) {
-            return;
+        if (this.isActiveTextFile(session, filePath) && entry && !entry.readonly) {
+            const key = `${session.server.id}:${filePath}`;
+            next.add(key);
+            if (!this.watchedFileVersionPaths.has(key)) {
+                session.server.hostSocket?.watchFileVersion(filePath);
+            }
         }
-        this.fileVersionCheckPromise = (async () => {
+        for (const key of this.watchedFileVersionPaths) {
+            if (next.has(key)) continue;
+            const [serverId, ...pathParts] = key.split(':');
+            const server = state.servers.get(serverId);
+            server?.hostSocket?.unwatchFileVersion(pathParts.join(':'));
+        }
+        this.watchedFileVersionPaths = next;
+    }
+
+    async handleWatchedFileVersionChanged(server, message) {
+        if (!server || !message?.path || isConfirmModalOpen()) return;
+        const filePath = message.path;
+        for (const session of getSessionsForServer(server.id)) {
+            const entry = this.getTextFileEntry(filePath, session);
+            if (!entry) continue;
+            const incomingVersion = typeof message.version === 'string'
+                ? message.version
+                : '';
+            if (
+                incomingVersion
+                && (
+                    incomingVersion === entry.version
+                    || incomingVersion === entry.lastDismissedRemoteVersion
+                )
+            ) {
+                continue;
+            }
+            const pendingWrite = this.getPendingFileWrite(session, filePath);
+            if (pendingWrite?.blocked) continue;
+            const currentContent = this.getCurrentTextFileContent(filePath, session);
+            const dirty = !!pendingWrite
+                || currentContent !== (entry.content || '')
+                || (entry.contentVersion || '') !== (entry.version || '');
+            const userEdited = dirty && entry.userEdited === true;
+            if (message.deleted) {
+                if (userEdited) {
+                    await this.resolveTextFileConflict(
+                        session,
+                        filePath,
+                        {
+                            version: '',
+                            content: '',
+                            readonly: false,
+                            deleted: true
+                        },
+                        'remote-change'
+                    );
+                } else {
+                    this.closeFile(filePath, session);
+                }
+                continue;
+            }
+            let snapshot = null;
             try {
-                const info = await this.readTextFileInfo(session, filePath);
-                if (
-                    !info
-                    || typeof info.version !== 'string'
-                    || !info.version
-                    || info.version === entry.version
-                    || info.version === entry.lastDismissedRemoteVersion
-                ) {
-                    return;
-                }
-                const pendingWrite = this.getPendingFileWrite(session, filePath);
-                if (pendingWrite?.blocked) {
-                    return;
-                }
+                snapshot = await this.readTextFileSnapshot(session, filePath);
+            } catch (error) {
+                console.warn('Failed to load changed file:', error);
+                continue;
+            }
+            if (userEdited) {
                 await this.resolveTextFileConflict(
                     session,
                     filePath,
-                    info,
+                    snapshot,
                     'remote-change'
                 );
-            } catch (error) {
-                console.warn('Failed to check file version:', error);
+                continue;
             }
-        })();
-        try {
-            await this.fileVersionCheckPromise;
-        } finally {
-            this.fileVersionCheckPromise = null;
+            this.clearPendingFileWrite(session.key, filePath);
+            this.applyTextFileSnapshot(session, filePath, snapshot);
+            this.renderEditorTabs();
         }
     }
 
@@ -3836,31 +4290,45 @@ class EditorManager {
         }
     }
 
-    updateTreeAutoRefresh() {
-        const shouldRun = (
-            document.visibilityState === 'visible'
-            && Array.from(state.sessions.values()).some(
-                (session) => this.canRefreshSessionTree(session)
+    syncTreeWatches() {
+        const next = new Set();
+        if (document.visibilityState === 'visible') {
+            for (const session of state.sessions.values()) {
+                if (!this.isSessionTreeVisible(session)) continue;
+                for (const dirPath of this.getSessionTreeRefreshPaths(session)) {
+                    next.add(`${session.server.id}:${dirPath}`);
+                    if (!this.watchedTreePaths.has(`${session.server.id}:${dirPath}`)) {
+                        session.server.hostSocket?.watchFileTree(dirPath);
+                    }
+                }
+            }
+        }
+        for (const key of this.watchedTreePaths) {
+            if (next.has(key)) continue;
+            const [serverId, ...pathParts] = key.split(':');
+            const server = state.servers.get(serverId);
+            server?.hostSocket?.unwatchFileTree(pathParts.join(':'));
+        }
+        this.watchedTreePaths = next;
+    }
+
+    handleWatchedTreeChanged(server, dirPath) {
+        if (!server || !dirPath) return;
+        const hasVisibleSubscriber = Array.from(state.sessions.values()).some(
+            (session) => (
+                session.serverId === server.id
+                && this.canRefreshSessionTree(session)
+                && this.getSessionTreeRefreshPaths(session).includes(dirPath)
             )
         );
-            if (shouldRun && !this.treeRefreshTimer) {
-            this.treeRefreshTimer = window.setInterval(() => {
-                if (document.visibilityState !== 'visible') {
-                    this.updateTreeAutoRefresh();
-                    return;
-                }
-                const hasVisibleTrees = Array.from(
-                    state.sessions.values()
-                ).some((session) => this.canRefreshSessionTree(session));
-                if (!hasVisibleTrees) {
-                    this.updateTreeAutoRefresh();
-                    return;
-                }
-                this.requestVisibleTreeRefresh();
-            }, FILE_TREE_REFRESH_INTERVAL_MS);
-            return;
+        if (hasVisibleSubscriber) {
+            this.requestVisibleTreeRefresh();
         }
-        if (!shouldRun && this.treeRefreshTimer) {
+    }
+
+    updateTreeAutoRefresh() {
+        this.syncTreeWatches();
+        if (this.treeRefreshTimer) {
             window.clearInterval(this.treeRefreshTimer);
             this.treeRefreshTimer = null;
         }
@@ -5291,6 +5759,7 @@ class EditorManager {
                     return;
                 }
                 entry.lastDismissedRemoteVersion = '';
+                entry.userEdited = true;
                 this.queuePendingFileWrite(
                     this.currentSession,
                     filePath,
@@ -6240,7 +6709,8 @@ class EditorManager {
                 contentVersion: version,
                 size,
                 mtimeMs,
-                lastDismissedRemoteVersion: ''
+                lastDismissedRemoteVersion: '',
+                userEdited: false
             }, targetSession);
         }
 
@@ -7824,6 +8294,12 @@ class EditorManager {
             agentTab
         );
         node.className = `agent-tool-call state-${toolStatusClass}`;
+        if (toolCall?.kind) {
+            node.classList.add(`kind-${String(toolCall.kind).toLowerCase()}`);
+        }
+        if (isDiffLikeTool(toolCall)) {
+            node.classList.add('kind-edit');
+        }
 
         const status = document.createElement('span');
         status.className = `agent-status-pill ${toolStatusClass}`;
@@ -10630,69 +11106,10 @@ class Session {
 
     connect() {
         if (!this.server.isAuthenticated) return;
-
-        if (
-            this.socket
-            && (
-                this.socket.readyState === WebSocket.OPEN
-                || this.socket.readyState === WebSocket.CONNECTING
-            )
-        ) {
-            return;
-        }
-        if (this.connectPromise) {
-            return;
-        }
-
-        this.connectPromise = (async () => {
-            const hasAccess = await this.server.ensureActiveAccessToken();
-            if (!hasAccess) {
-                return;
-            }
-
-            const endpoint = this.server.resolveWsUrl(this.id);
-            try {
-                this.socket = new WebSocket(
-                    endpoint,
-                    this.server.getWebSocketProtocols()
-                );
-            } catch (error) {
-                const hostName = getDisplayHost(this.server);
-                console.error(`[WS] Failed to connect ${hostName}:`, error);
-                setStatus(this.server, 'reconnecting');
-                if (error?.name === 'SecurityError') {
-                    alert(
-                        `${hostName} WebSocket blocked in HTTPS context. `
-                        + 'Use HTTPS/WSS endpoint for this host.',
-                        { type: 'warning', title: 'Connection' }
-                    );
-                }
-                return;
-            }
-
-            this.socket.addEventListener('open', () => {
-                this.reconnectAttempts = 0;
-                if (state.activeSessionKey === this.key) this.reportResize();
-            });
-
-            this.socket.addEventListener('message', (event) => {
-                try {
-                    this.handleMessage(JSON.parse(event.data));
-                } catch {
-                    // Ignore malformed websocket payloads.
-                }
-            });
-
-            this.socket.addEventListener('close', () => {
-                // We rely on the global heartbeat (syncSessions) to handle reconnection.
-                // This event listener just allows the socket to be garbage collected.
-            });
-
-            this.socket.addEventListener('error', () => {
-                // Often fires on 401 or connection refused.
-            });
-        })().finally(() => {
-            this.connectPromise = null;
+        this.server.hostSocket?.subscribeTerminal(this);
+        void this.server.startHeartbeat().then(() => {
+            this.server.hostSocket?.subscribeTerminal(this);
+            if (state.activeSessionKey === this.key) this.reportResize();
         });
     }
 
@@ -10967,16 +11384,14 @@ class Session {
     }
 
     send(payload) {
-        if (this.socket?.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify(payload));
-        }
+        this.server.hostSocket?.sendTerminal(this.id, payload);
     }
 
     claimTerminalControl(force = false) {
         if (state.activeSessionKey !== this.key) {
             return;
         }
-        if (this.socket?.readyState !== WebSocket.OPEN) {
+        if (!this.server.hostSocket?.isOpen()) {
             return;
         }
 
@@ -11069,7 +11484,7 @@ class Session {
     dispose() {
         this.shouldReconnect = false;
         clearTimeout(this.retryTimer);
-        this.socket?.close();
+        this.server.hostSocket?.unsubscribeTerminal(this.id);
         this.unbindTerminalControlClaim();
         this.disposeTerminalAddons();
 
@@ -11491,47 +11906,9 @@ class AgentTab {
 
     connect() {
         if (!this.server.isAuthenticated) return;
-        if (
-            this.socket
-            && (
-                this.socket.readyState === WebSocket.OPEN
-                || this.socket.readyState === WebSocket.CONNECTING
-            )
-        ) {
-            return;
-        }
-        if (this.connectPromise) {
-            return;
-        }
-
-        this.connectPromise = (async () => {
-            const hasAccess = await this.server.ensureActiveAccessToken();
-            if (!hasAccess) {
-                return;
-            }
-
-            const endpoint = this.server.resolveAgentWsUrl(this.id);
-            this.socket = new WebSocket(
-                endpoint,
-                this.server.getWebSocketProtocols()
-            );
-            this.socket.addEventListener('message', (event) => {
-                try {
-                    this.handleMessage(JSON.parse(event.data));
-                } catch {
-                    // Ignore malformed agent payloads.
-                }
-            });
-            this.socket.addEventListener('close', () => {
-                this.socket = null;
-                if (this.status === 'running') {
-                    this.status = 'disconnected';
-                    this.busy = false;
-                    this.notifyUi();
-                }
-            });
-        })().finally(() => {
-            this.connectPromise = null;
+        this.server.hostSocket?.subscribeAgent(this);
+        void this.server.startHeartbeat().then(() => {
+            this.server.hostSocket?.subscribeAgent(this);
         });
     }
 
@@ -12316,7 +12693,7 @@ class AgentTab {
 
     dispose() {
         this.#clearBusyWatchdog();
-        this.socket?.close();
+        this.server.hostSocket?.unsubscribeAgent(this.id);
         this.socket = null;
     }
 }
@@ -12512,66 +12889,15 @@ function requestImmediateServerSync(server, delayMs = 40) {
     }, delayMs);
 }
 
-const managedSessionSyncRetryTimers = new Map();
-
-function clearManagedSessionSyncRetry(serverId, sessionId) {
-    const retryKey = `${serverId}:${sessionId}`;
-    const timer = managedSessionSyncRetryTimers.get(retryKey);
-    if (timer) {
-        clearTimeout(timer);
-        managedSessionSyncRetryTimers.delete(retryKey);
-    }
-}
-
 function scheduleManagedTerminalSessionSync(
     server,
     terminalSessionId,
-    attemptsRemaining = 20
+    _attemptsRemaining = 20
 ) {
     if (!server || !server.isAuthenticated || !terminalSessionId) {
         return;
     }
-
-    const sessionKey = makeSessionKey(server.id, terminalSessionId);
-    if (state.sessions.has(sessionKey)) {
-        clearManagedSessionSyncRetry(server.id, terminalSessionId);
-        return;
-    }
-
-    const retryKey = `${server.id}:${terminalSessionId}`;
-    if (managedSessionSyncRetryTimers.has(retryKey)) {
-        return;
-    }
-
-    const runSyncAttempt = async () => {
-        try {
-            await syncServerSessionsNow(server);
-        } catch {
-            requestImmediateServerSync(server);
-        }
-
-        if (state.sessions.has(sessionKey)) {
-            clearManagedSessionSyncRetry(server.id, terminalSessionId);
-            return;
-        }
-
-        if (attemptsRemaining <= 0) {
-            clearManagedSessionSyncRetry(server.id, terminalSessionId);
-            return;
-        }
-
-        const timer = window.setTimeout(() => {
-            managedSessionSyncRetryTimers.delete(retryKey);
-            scheduleManagedTerminalSessionSync(
-                server,
-                terminalSessionId,
-                attemptsRemaining - 1
-            );
-        }, 250);
-        managedSessionSyncRetryTimers.set(retryKey, timer);
-    };
-
-    void runSyncAttempt();
+    void server.startHeartbeat();
 }
 
 async function syncServerSessionsNow(server) {
@@ -12582,40 +12908,21 @@ async function syncServerSessionsNow(server) {
             managedSessionKeys: []
         };
     }
-    const response = await server.fetch('/api/heartbeat', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            updates: { sessions: [] }
-        })
-    });
-    if (!response.ok) {
-        return {
-            ok: false,
-            sessionKeys: [],
-            managedSessionKeys: []
-        };
-    }
-    const data = await response.json();
-    reconcileSessions(server, data.sessions || []);
-    const sessionKeys = Array.isArray(data.sessions)
-        ? data.sessions.map((session) => makeSessionKey(
+    await server.startHeartbeat();
+    const sessions = getSessionsForServer(server.id);
+    const sessionKeys = sessions
+        .map((session) => makeSessionKey(
             server.id,
             session.id
+        ));
+    const managedSessionKeys = sessions
+        .filter((session) => (
+            session?.managed?.kind === 'agent-terminal'
         ))
-        : [];
-    const managedSessionKeys = Array.isArray(data.sessions)
-        ? data.sessions
-            .filter((session) => (
-                session?.managed?.kind === 'agent-terminal'
-            ))
-            .map((session) => makeSessionKey(
-                server.id,
-                session.id
-            ))
-        : [];
+        .map((session) => makeSessionKey(
+            server.id,
+            session.id
+        ));
     return {
         ok: true,
         sessionKeys,
@@ -14410,7 +14717,7 @@ function getAgentComposerFeedback(agentTab) {
         return {
             statusClass: 'error',
             statusLabel: 'Disconnected',
-            summary: 'Refresh or reconnect to restore live updates.',
+            summary: 'Reconnecting to restore live updates.',
             hotkey: ''
         };
     }
@@ -14690,18 +14997,38 @@ function getAgentTimelinePaths(toolLike) {
 function summarizeToolChanges(rawInput) {
     if (!rawInput || typeof rawInput !== 'object') return '';
     if (!rawInput.changes || typeof rawInput.changes !== 'object') return '';
-    const lines = Object.entries(rawInput.changes)
-        .slice(0, 5)
-        .map(([path, change]) => {
-            const kind = change?.type || 'change';
-            return `${kind}: ${path}`;
-        });
-    if (lines.length === 0) return '';
-    const extra = Object.keys(rawInput.changes).length - lines.length;
-    if (extra > 0) {
-        lines.push(`…and ${extra} more change${extra === 1 ? '' : 's'}`);
+    const entries = Object.entries(rawInput.changes);
+    if (entries.length === 0) return '';
+    const [path, change] = entries[0];
+    const kind = change?.type || 'change';
+    const extra = entries.length - 1;
+    return extra > 0
+        ? `${kind}: ${path} +${extra} more`
+        : `${kind}: ${path}`;
+}
+
+function isDiffLikeTool(toolCall) {
+    if (!toolCall || typeof toolCall !== 'object') return false;
+    if (toolCall.kind === 'edit') return true;
+    if (
+        toolCall.rawInput?.changes
+        && typeof toolCall.rawInput.changes === 'object'
+    ) {
+        return true;
     }
-    return lines.join('\n');
+    return Array.isArray(toolCall.content)
+        && toolCall.content.some((item) => item?.type === 'diff');
+}
+
+function buildEditToolCollapsedDiffLine(toolCall) {
+    if (!isDiffLikeTool(toolCall)) return '';
+    const paths = getAgentTimelinePaths(toolCall);
+    if (paths.length === 0) return 'Diff';
+    const firstPath = normalizeToolPathLabel(paths[0]);
+    const extra = paths.length - 1;
+    return extra > 0
+        ? `Diff: ${firstPath} +${extra} more`
+        : `Diff: ${firstPath}`;
 }
 
 function buildAgentPathLinks(agentTab, toolLike) {
@@ -14735,6 +15062,8 @@ function buildAgentPathLinks(agentTab, toolLike) {
 
 function buildAgentToolSummary(toolCall, terminals = null) {
     void terminals;
+    const editDiffLine = buildEditToolCollapsedDiffLine(toolCall);
+    if (editDiffLine) return compactAgentSummaryText(editDiffLine);
     const inputSummary = compactAgentSummaryText(
         summarizeAgentRawInput(toolCall?.rawInput)
     );
@@ -15772,7 +16101,7 @@ function upsertAgentTab(server, data) {
     const key = makeAgentTabKey(server.id, data.id);
     const existing = state.agentTabs.get(key);
     if (existing) {
-        const hasLiveSocket = existing.socket?.readyState === WebSocket.OPEN;
+        const hasLiveSocket = existing.server.hostSocket?.isOpen();
         let shouldNotify = true;
         if (
             hasLiveSocket
@@ -15860,49 +16189,6 @@ function shouldApplyAuthoritativeAgentSnapshot(existing, data) {
     }
     return buildComparableAgentTimelineTail(data)
         !== buildComparableAgentTimelineTail(existing);
-}
-
-function normalizeHeartbeatAgentTabIds(agents) {
-    const tabs = Array.isArray(agents?.tabs) ? agents.tabs : [];
-    return tabs
-        .map((entry) => {
-            if (typeof entry === 'string') return entry;
-            if (entry && typeof entry.id === 'string') return entry.id;
-            return '';
-        })
-        .map((id) => id.trim())
-        .filter(Boolean);
-}
-
-async function reconcileAgentHeartbeat(server, agents) {
-    if (!server || !agents || typeof agents !== 'object') {
-        return;
-    }
-    const tabIds = normalizeHeartbeatAgentTabIds(agents);
-    const seenKeys = new Set(tabIds.map((id) => makeAgentTabKey(server.id, id)));
-    let needsFullSync = !!agents.restoring && !server.agentStateLoaded;
-
-    for (const key of seenKeys) {
-        if (!state.agentTabs.has(key)) {
-            needsFullSync = true;
-            break;
-        }
-    }
-
-    if (!agents.restoring) {
-        for (const agentTab of getAgentTabsForServer(server.id)) {
-            if (seenKeys.has(agentTab.key)) continue;
-            removeAgentTab(agentTab.key);
-        }
-    }
-
-    if (needsFullSync) {
-        try {
-            await syncAgentsForServer(server, { force: true });
-        } catch (error) {
-            console.warn('Failed to load agent details from heartbeat index:', error);
-        }
-    }
 }
 
 function noteRecentAgentTab(session, agentTabKey) {
@@ -16444,202 +16730,38 @@ async function syncServer(server) {
         return server.syncPromise;
     }
     const promise = (async () => {
-        const now = Date.now();
-        const wasReconnecting = server.connectionStatus === 'reconnecting';
-        if (
-            wasReconnecting
-            && server.nextSyncAt
-            && now < server.nextSyncAt
-        ) {
-            return;
-        }
-
+        await server.startHeartbeat();
         for (const session of getSessionsForServer(server.id)) {
-            if (
-                !session.socket
-                || session.socket.readyState === WebSocket.CLOSED
-            ) {
-                session.connect();
-            }
+            session.connect();
         }
-
-        const updates = { sessions: [] };
-        const sentFileWrites = new Map();
         for (const [sessionKey, pending] of pendingChanges.sessions) {
             const { serverId, sessionId } = splitSessionKey(sessionKey);
             if (serverId !== server.id) continue;
-
-            const sessionUpdate = { id: sessionId };
-            let hasUpdate = false;
-
+            const patch = {};
             if (pending.resize) {
-                sessionUpdate.resize = pending.resize;
-                hasUpdate = true;
+                patch.resize = pending.resize;
             }
             if (pending.workspaceState) {
-                sessionUpdate.workspaceState = pending.workspaceState;
-                hasUpdate = true;
+                patch.workspaceState = pending.workspaceState;
             }
-            if (pending.fileWrites && pending.fileWrites.size > 0) {
-                const fileWrites = Array.from(
-                    pending.fileWrites.entries()
-                )
-                    .map(([path, write]) => ({
-                        path,
-                        write: editorManager.normalizePendingFileWrite(write)
-                    }))
-                    .filter(({ write }) => !write.blocked);
-                if (fileWrites.length > 0) {
-                    sessionUpdate.fileWrites = fileWrites.map(
-                        ({ path, write }) => ({
-                            path,
-                            content: write.content,
-                            expectedVersion: write.expectedVersion,
-                            force: write.force === true
-                        })
-                    );
-                    sentFileWrites.set(
-                        sessionUpdate.id,
-                        new Map(
-                            fileWrites.map(({ path, write }) => [path, write])
-                        )
-                    );
-                    hasUpdate = true;
+            if (Object.keys(patch).length > 0) {
+                server.hostSocket?.sendSessionPatch(sessionId, patch);
+                delete pending.resize;
+                delete pending.workspaceState;
+            }
+            if (pending.fileWrites?.size > 0) {
+                for (const [filePath, rawWrite] of pending.fileWrites.entries()) {
+                    const write = editorManager.normalizePendingFileWrite(rawWrite);
+                    if (write.blocked) continue;
+                    server.hostSocket?.sendFileWrite(sessionId, {
+                        sessionId,
+                        path: filePath,
+                        content: write.content,
+                        expectedVersion: write.expectedVersion,
+                        force: write.force === true
+                    });
+                    pending.fileWrites.delete(filePath);
                 }
-            }
-
-            if (hasUpdate) {
-                updates.sessions.push(sessionUpdate);
-            }
-        }
-
-        const startTime = Date.now();
-
-        try {
-            const abortController = new AbortController();
-            const abortTimer = setTimeout(() => abortController.abort(), 30_000);
-            let response;
-            try {
-                response = await server.fetch('/api/heartbeat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ updates }),
-                    signal: abortController.signal
-                });
-                clearTimeout(abortTimer);
-            } catch (error) {
-                clearTimeout(abortTimer);
-                throw error;
-            }
-
-            const latency = Date.now() - startTime;
-
-            if (!response.ok) {
-                if (!wasReconnecting) {
-                    console.warn(
-                        `[Heartbeat] ${getDisplayHost(server)} returned HTTP ${response.status}. Reconnecting...`
-                    );
-                }
-                server.nextSyncAt = Date.now() + RECONNECT_RETRY_MS;
-                setStatus(server, 'reconnecting');
-                server.lastLatency = -1;
-                pushServerHeartbeat(server, -1);
-                updateServerControlMetric(server);
-                if (getActiveServer()?.id === server.id) {
-                    updateSystemStatus(null, -1, server);
-                }
-                return;
-            }
-
-            for (const update of updates.sessions) {
-                const pending = pendingChanges.sessions.get(
-                    makeSessionKey(server.id, update.id)
-                );
-                if (!pending) continue;
-
-                if (update.resize) delete pending.resize;
-                if (update.workspaceState) delete pending.workspaceState;
-            }
-
-            const data = await response.json();
-            server.nextSyncAt = 0;
-            if (server.isPrimary) {
-                handlePrimaryRuntimeVersion(data);
-            }
-            server.needsAccessLogin = false;
-            server.accessLoginUrl = '';
-            setStatus(server, 'connected');
-            if (data.system) {
-                server.lastSystemData = mergeSystemData(
-                    server.lastSystemData,
-                    data.system
-                );
-                server.lastLatency = latency;
-                pushServerHeartbeat(server, latency);
-                updateServerControlMetric(server);
-                if (getActiveServer()?.id === server.id) {
-                    updateSystemStatus(server.lastSystemData, latency, server);
-                }
-            } else {
-                pushServerHeartbeat(server, latency);
-                updateServerControlMetric(server);
-            }
-
-            const sessions = Array.isArray(data) ? data : data.sessions;
-            reconcileSessions(server, sessions || []);
-            await reconcileAgentHeartbeat(server, data.agents);
-            await editorManager.applyFileWriteResults(
-                server,
-                Array.isArray(data?.fileWriteResults)
-                    ? data.fileWriteResults
-                    : [],
-                sentFileWrites
-            );
-
-            for (const [sessionId, writes] of sentFileWrites.entries()) {
-                const pending = pendingChanges.sessions.get(
-                    makeSessionKey(server.id, sessionId)
-                );
-                if (!pending?.fileWrites) {
-                    continue;
-                }
-                for (const [path] of writes.entries()) {
-                    if (!pending.fileWrites.has(path)) {
-                        continue;
-                    }
-                    const current = editorManager.normalizePendingFileWrite(
-                        pending.fileWrites.get(path)
-                    );
-                    if (!current.blocked) {
-                        pending.fileWrites.delete(path);
-                    }
-                }
-            }
-        } catch (error) {
-            const isAbort =
-                error?.name === 'AbortError' || error?.message?.includes('aborted');
-            if (!wasReconnecting) {
-                if (isAbort) {
-                    console.warn(
-                        `[Heartbeat] ${getDisplayHost(server)} timed out after 30s. Skipping...`
-                    );
-                } else {
-                    console.warn(
-                        `[Heartbeat] ${getDisplayHost(server)} unavailable (${formatHeartbeatError(error)}). Reconnecting...`
-                    );
-                }
-            }
-            if (isAbort) {
-                return;
-            }
-            if (!server.isAuthenticated) return;
-            server.nextSyncAt = Date.now() + RECONNECT_RETRY_MS;
-            setStatus(server, 'reconnecting');
-            server.lastLatency = -1;
-            pushServerHeartbeat(server, -1);
-            updateServerControlMetric(server);
-            if (getActiveServer()?.id === server.id) {
-                updateSystemStatus(null, -1, server);
             }
         }
     })();
@@ -16655,22 +16777,6 @@ async function syncServer(server) {
             requestImmediateServerSync(server, 0);
         }
     }
-}
-
-function formatHeartbeatError(error) {
-    if (!error) return 'unknown error';
-    if (typeof error === 'string') return error;
-    if (error.code === 'ACCESS_REDIRECT') {
-        return 'cloudflare access login required';
-    }
-    const name = typeof error.name === 'string' ? error.name : '';
-    const message = typeof error.message === 'string' ? error.message : '';
-    if (name === 'TypeError' && message.includes('Failed to fetch')) {
-        return 'network blocked or endpoint unreachable';
-    }
-    if (message) return message;
-    if (name) return name;
-    return 'unknown error';
 }
 
 let lastLatency = 0;
@@ -17087,6 +17193,33 @@ function updateSystemStatus(system, latency, server = getActiveServer()) {
     `).join('');
 }
 
+function upsertSession(server, data) {
+    if (!server || !data?.id) return null;
+    const key = makeSessionKey(server.id, data.id);
+    let session = state.sessions.get(key) || null;
+    let topologyChanged = false;
+    if (session) {
+        session.update(data);
+    } else {
+        session = new Session(data, server);
+        state.sessions.set(key, session);
+        topologyChanged = true;
+        if (!state.activeSessionKey) {
+            switchToSession(session.key);
+        }
+    }
+    renderTabs();
+    const activeAgentTab = getActiveAgentTab();
+    if (activeAgentTab?.serverId === server.id) {
+        if (topologyChanged) {
+            editorManager?.renderAgentPanel?.(activeAgentTab);
+        } else {
+            editorManager?.refreshVisibleAgentTerminals?.(activeAgentTab);
+        }
+    }
+    return session;
+}
+
 function reconcileSessions(server, remoteSessions) {
     const remoteIds = new Set(remoteSessions.map(session => session.id));
     const localSessions = getSessionsForServer(server.id);
@@ -17175,6 +17308,7 @@ async function createNewSession(server = getActiveServer(), options = {}) {
         if (!response.ok) throw new Error('Failed to create session');
         const newSession = await response.json();
         const sessionKey = makeSessionKey(server.id, newSession.id);
+        upsertSession(server, newSession);
         await syncServer(server);
         await switchToSession(
             sessionKey,

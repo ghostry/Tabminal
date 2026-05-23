@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { EventEmitter } from 'node:events';
 import pty from 'node-pty';
 import { TerminalSession, getClientEnvText } from './terminal-session.mjs';
 import * as persistence from './persistence.mjs';
@@ -137,8 +138,9 @@ function compareWorkspaceState(left, right) {
     return leftUpdatedBy.localeCompare(rightUpdatedBy);
 }
 
-export class TerminalManager {
+export class TerminalManager extends EventEmitter {
     constructor() {
+        super();
         this.sessions = new Map();
         this.snapshotPersistTimers = new Map();
         this.sessionPersistenceChains = new Map();
@@ -374,10 +376,14 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
         }
 
         this.sessions.set(id, session);
+        session.onStateChange((changedSession) => {
+            this.emit('session_updated', changedSession);
+        });
 
         if (session.persistent) {
             void this.saveSessionState(session);
         }
+        this.emit('session_created', session);
 
         ptyProcess.onExit(() => {
             if (session.removeOnExit) {
@@ -489,6 +495,7 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
             if (session.persistent) {
                 this.saveSessionState(session);
             }
+            this.emit('session_updated', session);
         }
     }
 
@@ -555,6 +562,7 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
             session.dispose();
             this.sessions.delete(id);
             await this.queueSessionPersistence(id, () => persistence.deleteSession(id));
+            this.emit('session_removed', { id });
             debugLog(`[Manager] Removed session ${id}`);
         }
     }
@@ -579,11 +587,7 @@ precmd_functions+=(_tabminal_zsh_apply_prompt_marker)
         }));
     }
 
-    /**
-     * Lightweight session listing for the heartbeat endpoint.
-     * Only includes topology and state that WebSocket meta/status may miss.
-     */
-    listHeartbeatSessions() {
+    listClientSessions() {
         return Array.from(this.sessions.values()).map(s => ({
             id: s.id,
             closed: !!s.closed,
