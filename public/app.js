@@ -15613,6 +15613,7 @@ function dispatchTextControlKey(control, key, options = {}) {
     const keyMap = {
         ESC: { key: 'Escape', code: 'Escape' },
         TAB: { key: 'Tab', code: 'Tab' },
+        ENTER: { key: 'Enter', code: 'Enter' },
         UP: { key: 'ArrowUp', code: 'ArrowUp' },
         DOWN: { key: 'ArrowDown', code: 'ArrowDown' },
         LEFT: { key: 'ArrowLeft', code: 'ArrowLeft' },
@@ -15636,6 +15637,8 @@ function dispatchTextControlKey(control, key, options = {}) {
     }
     if (key === 'TAB') {
         insertTextControlText(control, '\t');
+    } else if (key === 'ENTER' && control instanceof HTMLTextAreaElement) {
+        insertTextControlText(control, '\n');
     } else if (key === 'LEFT') {
         moveTextControlCursor(control, 'left');
     } else if (key === 'RIGHT') {
@@ -15664,6 +15667,7 @@ function dispatchMonacoKey(key, options = {}) {
     const keyMap = {
         ESC: { key: 'Escape', code: 'Escape' },
         TAB: { key: 'Tab', code: 'Tab' },
+        ENTER: { key: 'Enter', code: 'Enter' },
         UP: { key: 'ArrowUp', code: 'ArrowUp' },
         DOWN: { key: 'ArrowDown', code: 'ArrowDown' },
         LEFT: { key: 'ArrowLeft', code: 'ArrowLeft' },
@@ -15688,6 +15692,8 @@ function dispatchMonacoKey(key, options = {}) {
     }
     if (key === 'TAB') {
         editor.trigger('virtual-keys', 'type', { text: '\t' });
+    } else if (key === 'ENTER') {
+        editor.trigger('virtual-keys', 'type', { text: '\n' });
     } else if (key === 'LEFT') {
         editor.trigger('virtual-keys', 'cursorLeft', null);
     } else if (key === 'RIGHT') {
@@ -18805,6 +18811,7 @@ if (virtualKeys) {
             let data = '';
             if (key === 'ESC') data = '\x1b';
             else if (key === 'TAB') data = '\t';
+            else if (key === 'ENTER') data = '\r';
             else if (key === 'CTRL_C') data = '\x03';
             else if (key === 'UP') data = '\x1b[A';
             else if (key === 'DOWN') data = '\x1b[B';
