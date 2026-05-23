@@ -8297,7 +8297,8 @@ class EditorManager {
         if (toolCall?.kind) {
             node.classList.add(`kind-${String(toolCall.kind).toLowerCase()}`);
         }
-        if (isDiffLikeTool(toolCall)) {
+        const diffLikeTool = isDiffLikeTool(toolCall);
+        if (diffLikeTool) {
             node.classList.add('kind-edit');
         }
 
@@ -8311,19 +8312,21 @@ class EditorManager {
         ));
 
         const summaryText = buildAgentToolSummary(toolCall, agentTab.terminals);
-        if (summaryText) {
-            const summary = document.createElement('div');
-            summary.className = 'agent-tool-call-summary';
-            summary.textContent = summaryText;
-            node.appendChild(summary);
-        }
-
         const sections = buildAgentToolSections(
             toolCall,
             summaryText,
             agentTab.terminals,
             { includeInputSection: false }
         );
+        const hasDiffSection = sections.some((section) =>
+            section.label === 'Diff'
+        );
+        if (summaryText && !(diffLikeTool && hasDiffSection)) {
+            const summary = document.createElement('div');
+            summary.className = 'agent-tool-call-summary';
+            summary.textContent = summaryText;
+            node.appendChild(summary);
+        }
         if (
             toolCall.detailsAvailable
             && !toolCall.detailsLoaded
@@ -8627,6 +8630,9 @@ class EditorManager {
         }
         if (section?.kind === 'permission-detail-loader') {
             return this.buildAgentDetailLoaderBody(details, section, 'permission');
+        }
+        if (section?.kind === 'diff-group') {
+            return this.buildAgentDiffGroupSectionBody(details, section);
         }
         if (
             section?.kind === 'diff'
@@ -8969,6 +8975,28 @@ class EditorManager {
                 });
             }
         });
+        return host;
+    }
+
+    buildAgentDiffGroupSectionBody(details, section) {
+        const host = document.createElement('div');
+        host.className = 'agent-tool-call-diff-group';
+        const diffs = Array.isArray(section?.diffs) ? section.diffs : [];
+        for (const diff of diffs) {
+            const item = document.createElement('div');
+            item.className = 'agent-tool-call-diff-group-item';
+            const label = document.createElement('div');
+            label.className = 'agent-tool-call-diff-group-label';
+            label.textContent = normalizeToolPathLabel(diff.path || '');
+            item.appendChild(label);
+            item.appendChild(this.buildAgentDiffSectionBody(details, {
+                kind: 'diff',
+                path: diff.path || '',
+                oldText: diff.oldText || '',
+                newText: diff.newText || ''
+            }));
+            host.appendChild(item);
+        }
         return host;
     }
 
@@ -15376,6 +15404,49 @@ function buildAgentStructuredContentSections(
         toolCall?.detailsAvailable
         && !toolCall?.detailsLoaded
     );
+    if (isDiffLikeTool(toolCall)) {
+        const diffPreview = buildEditToolCollapsedDiffLine(toolCall)
+            .replace(/^Diff:\s*/, '');
+        const diffItems = Array.isArray(toolCall?.content)
+            ? toolCall.content.filter((item) => item?.type === 'diff')
+            : [];
+        const loadedDiffs = diffItems
+            .filter((item) => typeof item?.newText === 'string')
+            .map((item) => ({
+                path: item.path || '',
+                oldText: item.oldText || '',
+                newText: item.newText || ''
+            }));
+        if (shouldLoadDetails) {
+            return [{
+                label: 'Diff',
+                preview: diffPreview || 'Load diff',
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId,
+                detailInclude: 'diff'
+            }];
+        }
+        if (loadedDiffs.length > 1) {
+            return [{
+                label: 'Diff',
+                preview: diffPreview || `${loadedDiffs.length} files`,
+                kind: 'diff-group',
+                diffs: loadedDiffs
+            }];
+        }
+        if (loadedDiffs.length === 1) {
+            const diff = loadedDiffs[0];
+            return [{
+                label: 'Diff',
+                preview: diffPreview || normalizeToolPathLabel(diff.path),
+                text: truncateAgentDetail(diff.newText || ''),
+                kind: 'diff',
+                path: diff.path,
+                oldText: diff.oldText || '',
+                newText: diff.newText || ''
+            }];
+        }
+    }
     if (Array.isArray(toolCall?.content)) {
         for (const item of toolCall.content) {
             if (item?.type === 'terminal' && item.terminalId) {
@@ -15569,6 +15640,12 @@ function buildAgentToolSections(
             terminals
         )
     );
+    if (
+        isDiffLikeTool(toolCall)
+        && sections.some((section) => section.label === 'Diff')
+    ) {
+        return sections;
+    }
     const hasStructuredContent = sections.some((section) =>
         section.label === 'Content'
         || section.label === 'Diff'

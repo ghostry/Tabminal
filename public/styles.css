@@ -2956,6 +2956,27 @@ kbd {
     display: none;
 }
 
+.agent-tool-call-diff-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.agent-tool-call-diff-group-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agent-tool-call-diff-group-label {
+    color: var(--text-muted);
+    font-size: 10px;
+    padding: 2px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .agent-tool-call-summary-label {
     color: var(--text-muted);
     flex: 0 0 auto;
