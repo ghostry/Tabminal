@@ -1348,6 +1348,7 @@ class HostSocket {
             );
         }
         this.server.agentStateLoaded = !data.restoring;
+        finishAgentStateApply(this.server, { restoring: !!data.restoring });
     }
 
     close() {
@@ -16351,6 +16352,61 @@ function removeAgentTabsForTerminalSession(session) {
     }
 }
 
+function finishAgentStateApply(server, { restoring = false } = {}) {
+    if (!server || restoring) return;
+
+    const activeSession = getActiveSession();
+    const sessions = getSessionsForServer(server.id);
+    for (const session of sessions) {
+        const activeKey = session.workspaceState?.activeTabKey || '';
+        if (
+            isAgentWorkspaceTabKey(activeKey)
+            && state.agentTabs.has(activeKey)
+        ) {
+            noteRecentAgentTab(session, activeKey);
+            session.saveState({ touchWorkspace: true });
+        }
+    }
+
+    if (activeSession) {
+        if (activeSession.serverId === server.id) {
+            const activeKey = editorManager.getActiveWorkspaceTabKey(
+                activeSession
+            );
+            if (activeKey) {
+                restoreWorkspaceForSession(activeSession);
+            } else if (state.activeSessionKey === activeSession.key) {
+                editorManager.updateEditorPaneVisibility();
+            }
+        }
+        return;
+    }
+
+    const preferredSession = sessions.find((session) => {
+        const activeKey = session.workspaceState?.activeTabKey || '';
+        return (
+            isAgentWorkspaceTabKey(activeKey)
+            && state.agentTabs.has(activeKey)
+        );
+    }) || sessions.find(
+        (session) => getAgentTabsForSession(session).length > 0
+    );
+
+    if (preferredSession) {
+        if (!preferredSession.workspaceState.activeTabKey) {
+            preferredSession.workspaceState.activeTabKey = (
+                getAgentTabsForSession(preferredSession)[0]?.key || ''
+            );
+        }
+        preferredSession.saveState({ touchWorkspace: true });
+        if (state.activeSessionKey === preferredSession.key) {
+            restoreWorkspaceForSession(preferredSession);
+        } else {
+            switchToSession(preferredSession.key);
+        }
+    }
+}
+
 async function syncAgentsForServer(server, { force = false } = {}) {
     if (!server || !server.isAuthenticated) return;
     if (!force && server.agentStateLoaded) return;
@@ -16408,56 +16464,7 @@ async function syncAgentsForServer(server, { force = false } = {}) {
         return;
     }
 
-    const activeSession = getActiveSession();
-    const sessions = getSessionsForServer(server.id);
-    for (const session of sessions) {
-        const activeKey = session.workspaceState?.activeTabKey || '';
-        if (
-            isAgentWorkspaceTabKey(activeKey)
-            && state.agentTabs.has(activeKey)
-        ) {
-            noteRecentAgentTab(session, activeKey);
-            session.saveState({ touchWorkspace: true });
-        }
-    }
-
-    if (activeSession) {
-        if (activeSession.serverId === server.id) {
-            const activeKey = editorManager.getActiveWorkspaceTabKey(
-                activeSession
-            );
-            if (activeKey) {
-                restoreWorkspaceForSession(activeSession);
-            } else if (state.activeSessionKey === activeSession.key) {
-                editorManager.updateEditorPaneVisibility();
-            }
-        }
-        return;
-    }
-
-    const preferredSession = sessions.find((session) => {
-        const activeKey = session.workspaceState?.activeTabKey || '';
-        return (
-            isAgentWorkspaceTabKey(activeKey)
-            && state.agentTabs.has(activeKey)
-        );
-    }) || sessions.find(
-        (session) => getAgentTabsForSession(session).length > 0
-    );
-
-    if (preferredSession) {
-        if (!preferredSession.workspaceState.activeTabKey) {
-            preferredSession.workspaceState.activeTabKey = (
-                getAgentTabsForSession(preferredSession)[0]?.key || ''
-            );
-        }
-        preferredSession.saveState({ touchWorkspace: true });
-        if (state.activeSessionKey === preferredSession.key) {
-            restoreWorkspaceForSession(preferredSession);
-        } else {
-            switchToSession(preferredSession.key);
-        }
-    }
+    finishAgentStateApply(server);
 }
 
 async function createAgentTab(session, agentId, options = {}) {
