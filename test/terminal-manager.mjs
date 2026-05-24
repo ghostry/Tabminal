@@ -10,7 +10,8 @@ function createWorkspaceState(overrides = {}) {
         updatedBy: '',
         isVisible: false,
         openFiles: [],
-        terminalDisplayMode: 'auto',
+        terminalDisplayMode: 'tab',
+        terminalDisplayModeExplicit: false,
         expandedPaths: [],
         markdownSplitPath: '',
         activeWorkspaceTabKey: '',
@@ -98,6 +99,50 @@ describe('TerminalManager workspace sync', () => {
             })
         });
         assert.deepEqual(session.editorState.openFiles, ['/tmp/wins.js']);
+    });
+
+    it('defaults missing workspace terminal display mode to tab', () => {
+        const manager = new TerminalManager();
+        const session = {
+            editorState: createWorkspaceState({
+                updatedAt: 20,
+                terminalDisplayMode: 'auto'
+            }),
+            persistent: false
+        };
+        manager.sessions.set('session-default-mode', session);
+
+        manager.updateSessionState('session-default-mode', {
+            workspaceState: {
+                updatedAt: 21,
+                updatedBy: 'device-a',
+                openFiles: ['/tmp/file.js']
+            }
+        });
+
+        assert.equal(session.editorState.terminalDisplayMode, 'tab');
+    });
+
+    it('preserves explicitly selected automatic terminal layout', () => {
+        const manager = new TerminalManager();
+        const session = {
+            editorState: createWorkspaceState({ updatedAt: 20 }),
+            persistent: false
+        };
+        manager.sessions.set('session-explicit-auto', session);
+
+        manager.updateSessionState('session-explicit-auto', {
+            workspaceState: {
+                updatedAt: 21,
+                updatedBy: 'device-a',
+                terminalDisplayMode: 'auto',
+                terminalDisplayModeExplicit: true,
+                openFiles: ['/tmp/file.js']
+            }
+        });
+
+        assert.equal(session.editorState.terminalDisplayMode, 'auto');
+        assert.equal(session.editorState.terminalDisplayModeExplicit, true);
     });
 
     it('returns canonical workspaceState in session listings', () => {

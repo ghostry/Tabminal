@@ -81,6 +81,25 @@ function uniqueStringList(values) {
 function normalizeWorkspaceState(input = {}, fallback = {}) {
     const source = input && typeof input === 'object' ? input : {};
     const base = fallback && typeof fallback === 'object' ? fallback : {};
+    const sourceTerminalDisplayModeExplicit =
+        source.terminalDisplayModeExplicit === true;
+    const baseTerminalDisplayModeExplicit =
+        base.terminalDisplayModeExplicit === true;
+    const terminalDisplayMode = (
+        source.terminalDisplayMode === 'auto'
+        && sourceTerminalDisplayModeExplicit
+    )
+        ? 'auto'
+        : (
+            source.terminalDisplayMode === 'tab'
+                ? 'tab'
+                : (
+                    base.terminalDisplayMode === 'auto'
+                    && baseTerminalDisplayModeExplicit
+                        ? 'auto'
+                        : 'tab'
+                )
+        );
     const activeWorkspaceTabKey = typeof source.activeWorkspaceTabKey === 'string'
         ? source.activeWorkspaceTabKey
         : (
@@ -109,12 +128,11 @@ function normalizeWorkspaceState(input = {}, fallback = {}) {
                 typeof base.updatedBy === 'string'
                     ? base.updatedBy
                     : ''
-            ),
+        ),
         isVisible: !!source.isVisible,
         openFiles: uniqueStringList(source.openFiles),
-        terminalDisplayMode: source.terminalDisplayMode === 'tab'
-            ? 'tab'
-            : 'auto',
+        terminalDisplayMode,
+        terminalDisplayModeExplicit: terminalDisplayMode === 'auto',
         expandedPaths: uniqueStringList(source.expandedPaths),
         markdownSplitPath,
         activeWorkspaceTabKey

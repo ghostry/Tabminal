@@ -633,6 +633,25 @@ function uniqueStringList(values) {
 function normalizeWorkspaceSnapshot(input = {}, fallback = {}) {
     const source = input && typeof input === 'object' ? input : {};
     const base = fallback && typeof fallback === 'object' ? fallback : {};
+    const sourceTerminalDisplayModeExplicit =
+        source.terminalDisplayModeExplicit === true;
+    const baseTerminalDisplayModeExplicit =
+        base.terminalDisplayModeExplicit === true;
+    const terminalDisplayMode = (
+        source.terminalDisplayMode === 'auto'
+        && sourceTerminalDisplayModeExplicit
+    )
+        ? 'auto'
+        : (
+            source.terminalDisplayMode === 'tab'
+                ? 'tab'
+                : (
+                    base.terminalDisplayMode === 'auto'
+                    && baseTerminalDisplayModeExplicit
+                        ? 'auto'
+                        : 'tab'
+                )
+        );
     const updatedAt = Number.isFinite(source.updatedAt)
         ? source.updatedAt
         : (
@@ -679,9 +698,8 @@ function normalizeWorkspaceSnapshot(input = {}, fallback = {}) {
         updatedBy,
         isVisible: !!source.isVisible,
         openFiles,
-        terminalDisplayMode: source.terminalDisplayMode === 'tab'
-            ? 'tab'
-            : 'auto',
+        terminalDisplayMode,
+        terminalDisplayModeExplicit: terminalDisplayMode === 'auto',
         expandedPaths: uniqueStringList(source.expandedPaths),
         markdownSplitPath,
         activeWorkspaceTabKey
@@ -711,6 +729,8 @@ function buildWorkspaceSnapshotForSession(session, overrides = {}) {
         isVisible: session.editorState.isVisible,
         openFiles: session.editorState.openFiles,
         terminalDisplayMode: session.sharedWorkspaceState.terminalDisplayMode,
+        terminalDisplayModeExplicit:
+            session.sharedWorkspaceState.terminalDisplayModeExplicit,
         expandedPaths: session.sharedWorkspaceState.expandedPaths,
         markdownSplitPath: session.workspaceState.markdownSplitPath,
         activeWorkspaceTabKey: session.workspaceState.activeTabKey,
@@ -1972,6 +1992,7 @@ class EditorManager {
             return false;
         }
         session.sharedWorkspaceState.terminalDisplayMode = 'tab';
+        session.sharedWorkspaceState.terminalDisplayModeExplicit = false;
         return true;
     }
 
@@ -2181,6 +2202,7 @@ class EditorManager {
 
         if (isForcedTerminalWorkspaceMode()) {
             session.sharedWorkspaceState.terminalDisplayMode = 'auto';
+            session.sharedWorkspaceState.terminalDisplayModeExplicit = true;
             this.updateTerminalLayoutButton();
             return;
         }
@@ -2194,6 +2216,8 @@ class EditorManager {
         }
 
         session.sharedWorkspaceState.terminalDisplayMode = nextMode;
+        session.sharedWorkspaceState.terminalDisplayModeExplicit =
+            nextMode === 'auto';
         if (nextMode === 'tab') {
             session.workspaceState.activeTabKey = TERMINAL_WORKSPACE_TAB_KEY;
         } else if (
@@ -11130,7 +11154,17 @@ class Session {
             return;
         }
         const pending = getPendingSession(this.key);
-        pending.workspaceState = touchSharedWorkspace(this);
+        const workspaceState = touchSharedWorkspace(this);
+        pending.workspaceState = workspaceState;
+        if (
+            this.server?.hostSocket?.sendSessionPatch?.(this.id, {
+                workspaceState
+            })
+        ) {
+            delete pending.workspaceState;
+        } else {
+            requestImmediateServerSync(this.server, 0);
+        }
     }
 
     connect() {
@@ -16495,6 +16529,7 @@ async function activateAgentTab(session, agentTab, options = {}) {
     if (shouldSwitchSession && state.activeSessionKey !== session.key) {
         await switchToSession(session.key, { scrollTabIntoView: true });
     }
+    editorManager?.defaultTerminalToWorkspaceTab?.(session);
     session.workspaceState.activeTabKey = agentTab.key;
     noteRecentAgentTab(session, agentTab.key);
     session.saveState({ touchWorkspace: true });
