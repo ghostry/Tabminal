@@ -8676,6 +8676,49 @@ class EditorManager {
         return item;
     }
 
+    closeSiblingAgentSections(details) {
+        const container = details?.closest?.('.agent-tool-call-sections');
+        if (!container) return;
+        for (const sibling of container.querySelectorAll(
+            'details.agent-tool-call-section[open]'
+        )) {
+            if (sibling !== details) {
+                sibling.open = false;
+            }
+        }
+    }
+
+    unmountAgentSectionBody(bodyHost) {
+        if (!bodyHost || bodyHost.dataset.mounted !== 'true') {
+            return;
+        }
+        this.disposeAgentTimelineNode(bodyHost);
+        bodyHost.replaceChildren();
+        bodyHost.dataset.mounted = 'false';
+    }
+
+    mountAgentSectionBody(details, bodyHost, section) {
+        if (!details || !bodyHost) return;
+        if (bodyHost.dataset.mounted === 'true') {
+            return;
+        }
+        bodyHost.dataset.mounted = 'true';
+        bodyHost.appendChild(
+            this.buildAgentSectionBody(details, section)
+        );
+    }
+
+    bindAgentSectionDetails(details, bodyHost, section) {
+        details.addEventListener('toggle', () => {
+            if (details.open) {
+                this.closeSiblingAgentSections(details);
+                this.mountAgentSectionBody(details, bodyHost, section);
+            } else {
+                this.unmountAgentSectionBody(bodyHost);
+            }
+        });
+    }
+
     buildAgentToolNode(agentTab, toolCall) {
         const node = document.createElement('div');
         const toolStatusClass = getEffectiveAgentToolStatus(
@@ -8722,7 +8765,7 @@ class EditorManager {
             && sections.length === 0
         ) {
             sections.unshift({
-                label: 'Details',
+                label: 'Output',
                 preview: 'Load output',
                 kind: 'tool-detail-loader',
                 toolCallId: toolCall.toolCallId
@@ -8750,25 +8793,8 @@ class EditorManager {
                 details.appendChild(summary);
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
-                const mountBody = () => {
-                    if (bodyHost.dataset.mounted === 'true') {
-                        return;
-                    }
-                    bodyHost.dataset.mounted = 'true';
-                    bodyHost.appendChild(
-                        this.buildAgentSectionBody(details, section)
-                    );
-                };
                 details.appendChild(bodyHost);
-                if (details.open) {
-                    queueMicrotask(mountBody);
-                } else {
-                    details.addEventListener('toggle', () => {
-                        if (details.open) {
-                            mountBody();
-                        }
-                    }, { once: true });
-                }
+                this.bindAgentSectionDetails(details, bodyHost, section);
                 sectionContainer.appendChild(details);
             }
             node.appendChild(sectionContainer);
@@ -8838,7 +8864,7 @@ class EditorManager {
         );
         if (permission.detailsAvailable && !permission.detailsLoaded) {
             sections.unshift({
-                label: 'Details',
+                label: 'Output',
                 preview: 'Load output',
                 kind: 'permission-detail-loader',
                 permissionId: permission.id
@@ -8866,25 +8892,8 @@ class EditorManager {
                 details.appendChild(summary);
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
-                const mountBody = () => {
-                    if (bodyHost.dataset.mounted === 'true') {
-                        return;
-                    }
-                    bodyHost.dataset.mounted = 'true';
-                    bodyHost.appendChild(
-                        this.buildAgentSectionBody(details, section)
-                    );
-                };
                 details.appendChild(bodyHost);
-                if (details.open) {
-                    queueMicrotask(mountBody);
-                } else {
-                    details.addEventListener('toggle', () => {
-                        if (details.open) {
-                            mountBody();
-                        }
-                    }, { once: true });
-                }
+                this.bindAgentSectionDetails(details, bodyHost, section);
                 sectionContainer.appendChild(details);
             }
             card.appendChild(sectionContainer);
@@ -9046,6 +9055,83 @@ class EditorManager {
         return body;
     }
 
+    findLoadedAgentDetailSection(sections, loaderSection) {
+        const include = String(loaderSection?.detailInclude || '').trim();
+        if (include === 'diff') {
+            return sections.find((section) =>
+                section?.label === 'Diff'
+                && (
+                    section.kind === 'diff'
+                    || section.kind === 'diff-group'
+                )
+            ) || null;
+        }
+        if (include === 'terminal') {
+            return sections.find((section) =>
+                section?.label === 'Terminal'
+                && section.kind === 'terminal'
+            ) || null;
+        }
+        if (include === 'content') {
+            return sections.find((section) =>
+                section?.label === 'Content'
+                && section.kind !== 'tool-detail-loader'
+                && section.kind !== 'permission-detail-loader'
+            ) || null;
+        }
+        const outputSection = sections.find((section) =>
+            section?.label === 'Output'
+            && section.kind !== 'tool-detail-loader'
+            && section.kind !== 'permission-detail-loader'
+        );
+        if (outputSection) {
+            return outputSection;
+        }
+        return sections.find((section) =>
+            section?.kind !== 'tool-detail-loader'
+            && section?.kind !== 'permission-detail-loader'
+        ) || null;
+    }
+
+    getLoadedAgentDetailSection(agentTab, loaderSection, kind) {
+        if (!agentTab || !loaderSection) return null;
+        if (kind === 'tool') {
+            const toolCall = agentTab.toolCalls.get(
+                loaderSection.toolCallId
+            );
+            if (!toolCall) return null;
+            const summaryText = buildAgentToolSummary(
+                toolCall,
+                agentTab.terminals
+            );
+            return this.findLoadedAgentDetailSection(
+                buildAgentToolSections(
+                    toolCall,
+                    summaryText,
+                    agentTab.terminals,
+                    { includeInputSection: false }
+                ),
+                loaderSection
+            );
+        }
+        const permission = agentTab.permissions.get(
+            loaderSection.permissionId
+        );
+        if (!permission) return null;
+        const summaryText = buildAgentPermissionSummary(
+            permission,
+            agentTab.terminals
+        );
+        return this.findLoadedAgentDetailSection(
+            buildAgentPermissionSections(
+                permission,
+                summaryText,
+                agentTab.terminals
+            ),
+            loaderSection
+        );
+    }
+
     buildAgentDetailLoaderBody(details, section, kind) {
         const body = document.createElement('div');
         body.className = 'agent-tool-call-body';
@@ -9053,6 +9139,8 @@ class EditorManager {
         const load = async () => {
             const agentTab = getActiveAgentTab();
             if (!agentTab) return;
+            if (body.dataset.loading === 'true') return;
+            body.dataset.loading = 'true';
             try {
                 if (kind === 'tool') {
                     await agentTab.loadToolDetails(section.toolCallId, {
@@ -9063,14 +9151,25 @@ class EditorManager {
                         include: section.detailInclude || ''
                     });
                 }
-                this.renderAgentPanel(agentTab, {
-                    preserveTranscriptAnchor: this.captureAgentTranscriptAnchor(
-                        details.closest('[data-timeline-key]')?.dataset
-                            ?.timelineKey || ''
-                    )
-                });
+                const loadedSection = this.getLoadedAgentDetailSection(
+                    agentTab,
+                    section,
+                    kind
+                );
+                body.replaceChildren();
+                if (loadedSection) {
+                    body.className = 'agent-tool-call-section-loaded';
+                    body.appendChild(
+                        this.buildAgentSectionBody(details, loadedSection)
+                    );
+                } else {
+                    body.className = 'agent-tool-call-body';
+                    body.textContent = 'Output is not available yet.';
+                }
             } catch (error) {
                 body.textContent = error?.message || 'Failed to load details.';
+            } finally {
+                body.dataset.loading = 'false';
             }
         };
         if (details.open) {
@@ -9117,6 +9216,9 @@ class EditorManager {
                 glyphMargin: false,
                 folding: false,
                 renderWhitespace: 'selection',
+                scrollbar: {
+                    alwaysConsumeMouseWheel: false
+                },
                 wordWrap: 'off',
                 fontSize: IS_MOBILE ? 14 : 12,
                 fontFamily: "'Monaspace Neon', \"SF Mono Terminal\", "
@@ -9126,6 +9228,9 @@ class EditorManager {
         );
         this.trackAgentTimelineDisposable(host, editor);
         this.trackAgentTimelineDisposable(host, model);
+        requestAnimationFrame(() => {
+            editor.layout();
+        });
         details.addEventListener('toggle', () => {
             if (details.open) {
                 requestAnimationFrame(() => {
@@ -9313,13 +9418,16 @@ class EditorManager {
         const basePath = normalizeAgentEditorPath(
             section.path || '/snippet.txt'
         );
+        const modelToken = typeof globalThis.crypto?.randomUUID === 'function'
+            ? globalThis.crypto.randomUUID()
+            : `${Date.now()}-${Math.random()}`;
         const originalModel = this.monacoInstance.editor.createModel(
             section.oldText || '',
             undefined,
             this.monacoInstance.Uri.from({
                 scheme: 'agent-diff',
                 path: basePath,
-                query: 'original'
+                query: `original-${modelToken}`
             })
         );
         const modifiedModel = this.monacoInstance.editor.createModel(
@@ -9328,7 +9436,7 @@ class EditorManager {
             this.monacoInstance.Uri.from({
                 scheme: 'agent-diff',
                 path: basePath,
-                query: 'modified'
+                query: `modified-${modelToken}`
             })
         );
         const diffEditor = this.monacoInstance.editor.createDiffEditor(
@@ -9344,6 +9452,9 @@ class EditorManager {
                 renderSideBySide: false,
                 originalEditable: false,
                 diffWordWrap: 'off',
+                scrollbar: {
+                    alwaysConsumeMouseWheel: false
+                },
                 fontSize: IS_MOBILE ? 14 : 12,
                 fontFamily: "'Monaspace Neon', \"SF Mono Terminal\", "
                     + '"SFMono-Regular", "SF Mono", '
@@ -9357,6 +9468,9 @@ class EditorManager {
         this.trackAgentTimelineDisposable(host, diffEditor);
         this.trackAgentTimelineDisposable(host, originalModel);
         this.trackAgentTimelineDisposable(host, modifiedModel);
+        requestAnimationFrame(() => {
+            diffEditor.layout();
+        });
         details.addEventListener('toggle', () => {
             if (details.open) {
                 requestAnimationFrame(() => {
@@ -12108,7 +12222,17 @@ class AgentTab {
         if (data.toolCall?.toolCallId) {
             const normalizedDetail = this.#normalizeTimelineEntry(data.toolCall);
             const previous = this.toolCalls.get(data.toolCall.toolCallId) || {};
-            const complete = data.complete !== false && !include;
+            const mergedDetail = {
+                ...previous,
+                ...normalizedDetail
+            };
+            const statusClass = getEffectiveAgentToolStatus(mergedDetail, this);
+            const complete = (
+                data.complete !== false
+                && !include
+                && statusClass !== 'pending'
+                && statusClass !== 'running'
+            );
             const next = complete
                 ? {
                     ...normalizedDetail,
@@ -12160,7 +12284,17 @@ class AgentTab {
         if (data.permission?.id) {
             const normalizedDetail = this.#normalizeTimelineEntry(data.permission);
             const previous = this.permissions.get(data.permission.id) || {};
-            const complete = data.complete !== false && !include;
+            const mergedDetail = {
+                ...previous,
+                ...normalizedDetail
+            };
+            const permissionStatus = normalizeStatusClass(mergedDetail.status);
+            const complete = (
+                data.complete !== false
+                && !include
+                && permissionStatus !== 'pending'
+                && permissionStatus !== 'running'
+            );
             const next = complete
                 ? {
                     ...normalizedDetail,
