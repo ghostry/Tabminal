@@ -20,9 +20,11 @@ RUN userdel -f -r node 2>/dev/null || true; \
     usermod -aG docker coder && \
     echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder
 
-COPY . .
+COPY package.json package-lock.json ./
 
 RUN npm install
+
+COPY . .
 
 ENV PORT=9846
 ENV HOST=0.0.0.0

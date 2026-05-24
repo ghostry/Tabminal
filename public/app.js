@@ -3990,7 +3990,7 @@ class EditorManager {
             return;
         }
         if (isTerminalWorkspaceTabKey(activeKey)) {
-            this.activateTerminalTab(true);
+            this.activateTerminalTab(true, { focusTerminal: false });
         }
     }
 
@@ -4046,7 +4046,7 @@ class EditorManager {
             return;
         }
         if (isTerminalWorkspaceTabKey(activeKey)) {
-            this.activateTerminalTab(true);
+            this.activateTerminalTab(true, { focusTerminal: false });
             return;
         }
         this.showEmptyState();
@@ -4250,7 +4250,12 @@ class EditorManager {
             return {
                 session,
                 renderToken: session.fileTreeRenderToken,
-                scrollTop: session.fileTreeElement?.scrollTop || 0
+                scrollTop: session.fileTreeElement?.scrollTop || 0,
+                allowPendingFocus: !!(
+                    session.fileTreeElement
+                    && document.activeElement
+                    && session.fileTreeElement.contains(document.activeElement)
+                )
             };
         });
 
@@ -4291,7 +4296,7 @@ class EditorManager {
         );
 
         for (const plan of renderPlans) {
-            const { session, renderToken, scrollTop } = plan;
+            const { session, renderToken, scrollTop, allowPendingFocus } = plan;
             if (!session.fileTreeElement) {
                 continue;
             }
@@ -4300,7 +4305,8 @@ class EditorManager {
                 session.fileTreeElement,
                 session,
                 directorySnapshots,
-                renderToken
+                renderToken,
+                { allowPendingFocus }
             );
             if (session.fileTreeRenderToken === renderToken) {
                 session.fileTreeElement.scrollTop = scrollTop;
@@ -5286,7 +5292,7 @@ class EditorManager {
         list.appendChild(row);
     }
 
-    updateTreeItem(li, file, session) {
+    updateTreeItem(li, file, session, options = {}) {
         li.dataset.path = file.path;
         li.dataset.isDirectory = file.isDirectory ? '1' : '0';
         li.dataset.renameable = file.renameable ? '1' : '0';
@@ -5714,14 +5720,24 @@ class EditorManager {
 
         if (session.pendingTreeFocusPath === file.path) {
             session.pendingTreeFocusPath = '';
-            requestAnimationFrame(() => {
-                row.scrollIntoView({ block: 'nearest' });
-                session.fileTreeElement?.focus({ preventScroll: true });
-            });
+            if (options.allowPendingFocus) {
+                requestAnimationFrame(() => {
+                    row.scrollIntoView({ block: 'nearest' });
+                    session.fileTreeElement?.focus({ preventScroll: true });
+                });
+            }
         }
     }
 
-    reconcileTreeList(list, dirPath, files, creatable, git, session) {
+    reconcileTreeList(
+        list,
+        dirPath,
+        files,
+        creatable,
+        git,
+        session,
+        options = {}
+    ) {
         const existingItems = new Map();
         Array.from(list.children).forEach((child) => {
             if (child.tagName === 'LI' && child.dataset.path) {
@@ -5737,7 +5753,7 @@ class EditorManager {
             } else {
                 existingItems.delete(file.path);
             }
-            this.updateTreeItem(li, file, session);
+            this.updateTreeItem(li, file, session, options);
             orderedItems.push(li);
         }
 
@@ -6606,7 +6622,8 @@ class EditorManager {
         container,
         session,
         directorySnapshots,
-        renderToken = session?.fileTreeRenderToken || 0
+        renderToken = session?.fileTreeRenderToken || 0,
+        options = {}
     ) {
         const listing = directorySnapshots.get(
             this.getTreeRefreshRequestKey(session.server, dirPath)
@@ -6625,7 +6642,8 @@ class EditorManager {
             listing.files,
             listing.creatable,
             listing.git,
-            session
+            session,
+            options
         );
         if ((session.fileTreeRenderToken || 0) !== renderToken) {
             return;
@@ -6645,7 +6663,8 @@ class EditorManager {
                         item,
                         session,
                         directorySnapshots,
-                        renderToken
+                        renderToken,
+                        options
                     );
                 }
             }
@@ -7213,9 +7232,12 @@ class EditorManager {
         );
     }
 
-    activateWorkspaceTab(workspaceTabKey, isRestore = false) {
+    activateWorkspaceTab(workspaceTabKey, isRestore = false, options = {}) {
+        const preserveFocus = isRestore && options.preserveFocus === true;
         if (isTerminalWorkspaceTabKey(workspaceTabKey)) {
-            this.activateTerminalTab(isRestore);
+            this.activateTerminalTab(isRestore, {
+                focusTerminal: !preserveFocus
+            });
             return;
         }
         if (isAgentWorkspaceTabKey(workspaceTabKey)) {
@@ -7229,11 +7251,18 @@ class EditorManager {
             );
             return;
         }
-        this.activateFileTab(workspaceKeyToFilePath(workspaceTabKey), isRestore);
+        this.activateFileTab(
+            workspaceKeyToFilePath(workspaceTabKey),
+            isRestore,
+            {
+                focusEditor: !preserveFocus
+            }
+        );
     }
 
-    activateTerminalTab(isRestore = false) {
+    activateTerminalTab(isRestore = false, options = {}) {
         if (!this.currentSession) return;
+        const focusTerminal = options.focusTerminal !== false;
 
         if (
             !isRestore
@@ -7268,7 +7297,9 @@ class EditorManager {
 
         requestAnimationFrame(() => {
             if (this.currentSession.fitMainTerminalIfVisible()) {
-                this.currentSession.mainTerm.focus();
+                if (focusTerminal) {
+                    this.currentSession.mainTerm.focus();
+                }
             }
             this.currentSession.reportResize();
         });
@@ -16158,8 +16189,9 @@ function dispatchMonacoKey(key, options = {}) {
     return true;
 }
 
-function refreshWorkspaceIfSessionActive(session) {
+function refreshWorkspaceIfSessionActive(session, options = {}) {
     if (!session) return;
+    const preserveFocus = options.preserveFocus !== false;
     if (state.activeSessionKey !== session.key) return;
     if (editorManager.currentSession?.key !== session.key) {
         editorManager.switchTo(session);
@@ -16168,15 +16200,18 @@ function refreshWorkspaceIfSessionActive(session) {
     const activeKey = editorManager.getActiveWorkspaceTabKey(session);
     editorManager.renderEditorTabs();
     if (activeKey) {
-        editorManager.activateWorkspaceTab(activeKey, true);
+        editorManager.activateWorkspaceTab(activeKey, true, {
+            preserveFocus
+        });
     } else {
         editorManager.showEmptyState();
     }
     editorManager.updateEditorPaneVisibility();
 }
 
-function restoreWorkspaceForSession(session) {
+function restoreWorkspaceForSession(session, options = {}) {
     if (!session) return;
+    const preserveFocus = options.preserveFocus !== false;
     if (editorManager.currentSession?.key !== session.key) {
         editorManager.switchTo(session);
     } else {
@@ -16184,7 +16219,9 @@ function restoreWorkspaceForSession(session) {
     }
     const activeKey = editorManager.getActiveWorkspaceTabKey(session);
     if (activeKey) {
-        editorManager.activateWorkspaceTab(activeKey, true);
+        editorManager.activateWorkspaceTab(activeKey, true, {
+            preserveFocus
+        });
     } else {
         editorManager.showEmptyState();
     }
