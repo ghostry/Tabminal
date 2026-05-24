@@ -9093,13 +9093,53 @@ class EditorManager {
         ) || null;
     }
 
+    buildLoadedAgentOutputSection(toolLike, terminals = null) {
+        const rawOutput = summarizeAgentRawOutput(toolLike?.rawOutput);
+        if (rawOutput) {
+            return {
+                label: 'Output',
+                text: rawOutput,
+                kind: 'text'
+            };
+        }
+        const terminalIds = getAgentToolTerminalIds(toolLike);
+        for (const terminalId of terminalIds) {
+            const terminal = resolveAgentTerminalSummary(terminals, terminalId);
+            const output = String(terminal?.output || '').trim();
+            if (output) {
+                return {
+                    label: 'Output',
+                    preview: terminal?.command || terminalId,
+                    text: output,
+                    kind: 'text'
+                };
+            }
+        }
+        const content = summarizeToolCallContent(toolLike, terminals);
+        if (content) {
+            return {
+                label: 'Output',
+                text: content,
+                kind: 'text'
+            };
+        }
+        return null;
+    }
+
     getLoadedAgentDetailSection(agentTab, loaderSection, kind) {
         if (!agentTab || !loaderSection) return null;
+        const include = String(loaderSection?.detailInclude || '').trim();
         if (kind === 'tool') {
             const toolCall = agentTab.toolCalls.get(
                 loaderSection.toolCallId
             );
             if (!toolCall) return null;
+            if (!include) {
+                return this.buildLoadedAgentOutputSection(
+                    toolCall,
+                    agentTab.terminals
+                );
+            }
             const summaryText = buildAgentToolSummary(
                 toolCall,
                 agentTab.terminals
@@ -9118,6 +9158,12 @@ class EditorManager {
             loaderSection.permissionId
         );
         if (!permission) return null;
+        if (!include) {
+            return this.buildLoadedAgentOutputSection(
+                permission.toolCall || {},
+                agentTab.terminals
+            );
+        }
         const summaryText = buildAgentPermissionSummary(
             permission,
             agentTab.terminals
@@ -9194,9 +9240,13 @@ class EditorManager {
         )}px`;
         host.appendChild(editorNode);
 
+        const modelToken = typeof globalThis.crypto?.randomUUID === 'function'
+            ? globalThis.crypto.randomUUID()
+            : `${Date.now()}-${Math.random()}`;
         const uri = this.monacoInstance.Uri.from({
             scheme: 'agent-code',
-            path: normalizeAgentEditorPath(section.path || '/snippet.txt')
+            path: normalizeAgentEditorPath(section.path || '/snippet.txt'),
+            query: modelToken
         });
         const model = this.monacoInstance.editor.createModel(
             section.text || '',
@@ -16198,18 +16248,10 @@ function buildAgentToolSections(
     }
     const rawOutput = summarizeAgentRawOutput(toolCall?.rawOutput);
     if (rawOutput && !isAgentSectionRedundant(rawOutput, summaryText)) {
-        const codePath = ['read', 'edit'].includes(toolCall?.kind)
-            ? getFirstToolPath(toolCall)
-            : '';
         sections.push({
             label: 'Output',
             text: rawOutput,
-            kind: codePath
-                && !/^STD(?:OUT|ERR)\n/.test(rawOutput)
-                ? 'code'
-                : 'text',
-            path: codePath,
-            preview: codePath ? normalizeToolPathLabel(codePath) : ''
+            kind: 'text'
         });
     }
     return sections;
