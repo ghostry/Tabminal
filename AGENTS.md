@@ -1,56 +1,40 @@
-# Repository Guidelines
+# 仓库指南
 
-## Project Structure & Module Organization
+## 项目结构与模块组织
 
-Tabminal is a Node.js ESM application. The backend entry point is
-`src/server.mjs`; terminal lifecycle code lives in `src/terminal-session.mjs`
-and `src/terminal-manager.mjs`; ACP agent supervision lives in
-`src/acp-manager.mjs`. The browser UI is primarily `public/app.js`, with
-styles in `public/styles.css`, shell markup in `public/index.html`, and shared
-frontend helpers under `public/modules/`. Tests are in `test/`, browser smoke
-scripts are in `scripts/`, shell integration files are in `shell/`, and native
-app workspaces are under `apps/`.
+Tabminal 是一个 Node.js ESM 应用。后端入口是 `src/server.mjs`；终端生命周期代码位于
+`src/terminal-session.mjs` 和 `src/terminal-manager.mjs`；ACP agent 监管逻辑位于
+`src/acp-manager.mjs`。浏览器端 UI 主要在 `public/app.js`，样式在
+`public/styles.css`，页面外壳标记在 `public/index.html`，共享前端辅助模块位于
+`public/modules/`。测试位于 `test/`，浏览器冒烟脚本位于 `scripts/`，shell 集成文件位于
+`shell/`，原生应用工作区位于 `apps/`。
 
-## Build, Test, and Development Commands
+## 构建、测试与开发命令
 
-- `npm start -- --accept-terms`: run the local server.
-- `npm run dev -- --accept-terms`: run with Node watch mode for `src/` and
-  `public/`.
-- `npm run build`: run `build.mjs` and produce distributable assets.
-- `npm run lint`: run ESLint across the repository.
-- `npm test`: run the full Node test suite.
-- `node --test test/acp-manager.mjs`: run a focused test file.
+- `npm start -- --accept-terms`：运行本地服务。
+- `npm run dev -- --accept-terms`：用 Node watch 模式监听 `src/` 和 `public/`。
+- `npm run build`：运行 `build.mjs` 并生成可分发资源。
+- `npm run lint`：对整个仓库运行 ESLint。
+- `npm test`：运行完整 Node 测试套件。
+- `node --test test/acp-manager.mjs`：运行指定测试文件。
 
-Use `TABMINAL_ENABLE_TEST_AGENT=1 npm start -- --accept-terms` when validating
-ACP UI flows with the built-in test agent.
+验证 ACP UI 流程并使用内置测试 agent 时，使用
+`TABMINAL_ENABLE_TEST_AGENT=1 npm start -- --accept-terms`。
 
-## Coding Style & Naming Conventions
+用户测试服务脚本`test.sh`，功能修改完成后，后台 运行/重启 此脚本供用户测试
 
-Use modern ESM JavaScript with two-space indentation where existing files do.
-Prefer explicit helper functions over ad hoc inline parsing, and follow nearby
-patterns before adding new abstractions. Keep user-facing labels consistent:
-the UI term is `Host`, not `Server`. Frontend state is host-isolated; do not
-merge sessions, files, agent tabs, or auth state across hosts.
+## 代码风格与命名约定
 
-## Testing Guidelines
+使用现代 ESM JavaScript，并遵循现有文件的两空格缩进。优先使用明确的辅助函数，避免临时的内联解析；新增抽象前先遵循附近代码模式。保持面向用户的标签一致：UI 术语是 `Host`，不是 `Server`。前端状态按 Host 隔离；不要跨 Host 合并会话、文件、agent 标签页或认证状态。
 
-Tests use Node's built-in test runner (`node --test`) and `assert`. Add or
-update focused tests for backend behavior, persistence, ACP state changes, and
-terminal session contracts. For significant UI/ACP changes, run the relevant
-unit tests plus `npm run lint`; use `scripts/acp-browser-smoke.mjs` for browser
-coverage when interaction behavior changes.
+## 测试指南
 
-## Commit & Pull Request Guidelines
+测试使用 Node 内置测试运行器（`node --test`）和 `assert`。后端行为、持久化、ACP 状态变化和终端会话契约相关改动，应新增或更新聚焦测试。涉及重要 UI/ACP 改动时，运行相关单元测试和 `npm run lint`；交互行为变化需要浏览器覆盖时，使用 `scripts/acp-browser-smoke.mjs`。
 
-Recent commits use concise Chinese imperative summaries, for example
-`减少终端和 ACP 按需加载流量` or `修复文件树 Git 重置`. Keep commits focused and
-mention the affected subsystem. Pull requests should include a short summary,
-test results, linked issues when applicable, and screenshots or recordings for
-visible UI changes.
+## 提交与拉取请求指南
 
-## Security & Configuration Tips
+近期提交使用简洁的中文祈使句摘要，例如 `减少终端和 ACP 按需加载流量` 或 `修复文件树 Git 重置`。保持提交聚焦，并说明受影响的子系统。拉取请求应包含简短摘要、测试结果、相关 issue 链接（如适用），以及可见 UI 变化的截图或录屏。
 
-This app controls terminals and may launch external ACP runtimes. Do not commit
-tokens, private config, or files from `~/.tabminal`. Keep auth browser-owned,
-preserve main-host global auth behavior, and avoid weakening WebSocket
-reconnect or host-isolation rules without measurement.
+## 安全与配置提示
+
+此应用会控制终端，并可能启动外部 ACP 运行时。不要提交 token、私有配置或 `~/.tabminal` 中的文件。认证状态应保持由浏览器持有，保留主 Host 的全局认证行为；没有测量依据时，不要削弱 WebSocket 重连或 Host 隔离规则。

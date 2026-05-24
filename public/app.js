@@ -35,6 +35,7 @@ const {
 const DEPRECATED_AUTH_TOKEN_STORAGE_PREFIX = 'tabminal_auth_token:';
 const WEBSOCKET_PROTOCOL = 'tabminal.v1';
 const WEBSOCKET_AUTH_PROTOCOL_PREFIX = 'tabminal.auth.';
+const EDITOR_WORD_WRAP_STORAGE_KEY = 'tabminal_editor_word_wrap';
 
 function clearDeprecatedPasswordHashAuthStorage() {
     try {
@@ -721,6 +722,172 @@ function compareWorkspaceSnapshots(left, right) {
         ? right.updatedBy
         : '';
     return leftUpdatedBy.localeCompare(rightUpdatedBy);
+}
+
+function splitMergeLines(text) {
+    return String(text || '').match(/[^\n]*\n|[^\n]+/g) || [];
+}
+
+function findSingleTextChangeSpan(baseLines, changedLines) {
+    let prefix = 0;
+    while (
+        prefix < baseLines.length
+        && prefix < changedLines.length
+        && baseLines[prefix] === changedLines[prefix]
+    ) {
+        prefix += 1;
+    }
+
+    let baseSuffix = baseLines.length;
+    let changedSuffix = changedLines.length;
+    while (
+        baseSuffix > prefix
+        && changedSuffix > prefix
+        && baseLines[baseSuffix - 1] === changedLines[changedSuffix - 1]
+    ) {
+        baseSuffix -= 1;
+        changedSuffix -= 1;
+    }
+
+    return [{
+        start: prefix,
+        end: baseSuffix,
+        lines: changedLines.slice(prefix, changedSuffix)
+    }];
+}
+
+function buildTextChangeSpans(baseLines, changedLines) {
+    if (baseLines.join('') === changedLines.join('')) {
+        return [];
+    }
+
+    const rowCount = baseLines.length + 1;
+    const columnCount = changedLines.length + 1;
+    if (rowCount * columnCount > 4_000_000) {
+        return findSingleTextChangeSpan(baseLines, changedLines);
+    }
+
+    const table = Array.from(
+        { length: rowCount },
+        () => new Uint32Array(columnCount)
+    );
+    for (let baseIndex = baseLines.length - 1; baseIndex >= 0; baseIndex -= 1) {
+        const row = table[baseIndex];
+        const nextRow = table[baseIndex + 1];
+        for (
+            let changedIndex = changedLines.length - 1;
+            changedIndex >= 0;
+            changedIndex -= 1
+        ) {
+            row[changedIndex] = baseLines[baseIndex] === changedLines[changedIndex]
+                ? nextRow[changedIndex + 1] + 1
+                : Math.max(nextRow[changedIndex], row[changedIndex + 1]);
+        }
+    }
+
+    const spans = [];
+    let baseIndex = 0;
+    let changedIndex = 0;
+    let pending = null;
+    const flush = () => {
+        if (!pending) return;
+        spans.push({
+            start: pending.start,
+            end: pending.end,
+            lines: pending.lines
+        });
+        pending = null;
+    };
+    const ensurePending = () => {
+        if (!pending) {
+            pending = { start: baseIndex, end: baseIndex, lines: [] };
+        }
+        return pending;
+    };
+
+    while (baseIndex < baseLines.length || changedIndex < changedLines.length) {
+        if (
+            baseIndex < baseLines.length
+            && changedIndex < changedLines.length
+            && baseLines[baseIndex] === changedLines[changedIndex]
+        ) {
+            flush();
+            baseIndex += 1;
+            changedIndex += 1;
+        } else if (
+            changedIndex < changedLines.length
+            && (
+                baseIndex >= baseLines.length
+                || table[baseIndex][changedIndex + 1]
+                    >= table[baseIndex + 1][changedIndex]
+            )
+        ) {
+            ensurePending().lines.push(changedLines[changedIndex]);
+            changedIndex += 1;
+        } else {
+            ensurePending().end = baseIndex + 1;
+            baseIndex += 1;
+        }
+    }
+    flush();
+    return spans;
+}
+
+function spansOverlap(left, right) {
+    return left.start < right.end && right.start < left.end;
+}
+
+function mergeTextFromBase(baseText, localText, remoteText) {
+    if (localText === remoteText) {
+        return { merged: localText, clean: true, changed: false };
+    }
+    if (baseText === localText) {
+        return { merged: remoteText, clean: true, changed: true };
+    }
+    if (baseText === remoteText) {
+        return { merged: localText, clean: true, changed: false };
+    }
+
+    const baseLines = splitMergeLines(baseText);
+    const localLines = splitMergeLines(localText);
+    const remoteLines = splitMergeLines(remoteText);
+    const localSpans = buildTextChangeSpans(baseLines, localLines);
+    const remoteSpans = buildTextChangeSpans(baseLines, remoteLines);
+    const conflicting = remoteSpans.some(
+        (remoteSpan) => localSpans.some(
+            (localSpan) => spansOverlap(remoteSpan, localSpan)
+        )
+    );
+    if (conflicting) {
+        return { merged: localText, clean: false, changed: false };
+    }
+
+    const allSpans = [
+        ...localSpans.map((span) => ({ ...span, source: 'local' })),
+        ...remoteSpans.map((span) => ({ ...span, source: 'remote' }))
+    ].sort((left, right) => (
+        left.start - right.start
+        || left.end - right.end
+        || (left.source === 'remote' ? 1 : -1)
+    ));
+    const mergedLines = [];
+    let cursor = 0;
+    for (const span of allSpans) {
+        if (span.start < cursor) {
+            return { merged: localText, clean: false, changed: false };
+        }
+        mergedLines.push(...baseLines.slice(cursor, span.start));
+        mergedLines.push(...span.lines);
+        cursor = span.end;
+    }
+    mergedLines.push(...baseLines.slice(cursor));
+
+    const merged = mergedLines.join('');
+    return {
+        merged,
+        clean: true,
+        changed: merged !== localText
+    };
 }
 
 function buildWorkspaceSnapshotForSession(session, overrides = {}) {
@@ -1933,6 +2100,7 @@ class EditorManager {
         this.fileVersionCheckPromise = null;
         this.fileConflictDialogKey = '';
         this.suppressFileWriteCapture = false;
+        this.editorWordWrapEnabled = this.loadEditorWordWrapPreference();
         this.agentTranscriptResizeObserver = null;
         this.treeDirectoryFetches = new Map();
         this.watchedTreePaths = new Set();
@@ -2941,6 +3109,17 @@ class EditorManager {
         }
 
         const content = this.editor.getValue();
+        if (entry.pendingRemoteConflict) {
+            const pending = entry.pendingRemoteConflict;
+            this.autoMergeRemoteTextFileSnapshot(
+                session,
+                filePath,
+                pending.snapshot,
+                pending.source
+            );
+            return true;
+        }
+
         const pendingWrite = this.getPendingFileWrite(session, filePath);
         if (
             pendingWrite?.blocked
@@ -3007,6 +3186,102 @@ class EditorManager {
             // Ignore model access failures and fall back to cached content.
         }
         return typeof entry.content === 'string' ? entry.content : '';
+    }
+
+    clearDeferredRemoteFileConflict(entry) {
+        if (!entry) return;
+        entry.pendingRemoteConflict = null;
+    }
+
+    deferRemoteFileConflict(session, filePath, snapshot, source) {
+        const entry = this.getTextFileEntry(filePath, session);
+        if (!entry || !snapshot) return;
+        entry.pendingRemoteConflict = { snapshot, source };
+        if (this.currentSession?.key === session.key) {
+            this.renderEditorTabs();
+        }
+    }
+
+    applyMergedTextFileSnapshot(session, filePath, entry, snapshot, mergedText) {
+        const remoteContent = typeof snapshot.content === 'string'
+            ? snapshot.content
+            : '';
+        const nextVersion = typeof snapshot.version === 'string'
+            ? snapshot.version
+            : entry.version || '';
+        const restoreViewState = (
+            this.isActiveTextFile(session, filePath)
+            && this.editor
+            && this.editor.getModel?.() === entry.model
+        )
+            ? this.editor.saveViewState()
+            : null;
+
+        this.applyProgrammaticTextContent(entry, mergedText);
+        if (restoreViewState && this.editor) {
+            this.editor.restoreViewState(restoreViewState);
+        }
+
+        entry.content = remoteContent;
+        entry.version = nextVersion;
+        entry.contentVersion = nextVersion;
+        entry.readonly = !!snapshot.readonly;
+        entry.size = Number.isFinite(snapshot.size) ? snapshot.size : entry.size;
+        entry.mtimeMs = Number.isFinite(snapshot.mtimeMs)
+            ? snapshot.mtimeMs
+            : entry.mtimeMs;
+        entry.lastDismissedRemoteVersion = '';
+        entry.pendingRemoteConflict = null;
+        entry.userEdited = mergedText !== remoteContent;
+
+        if (entry.userEdited) {
+            this.queuePendingFileWrite(session, filePath, mergedText, {
+                expectedVersion: nextVersion,
+                blocked: false,
+                force: false
+            });
+        } else {
+            this.clearPendingFileWrite(session.key, filePath);
+        }
+
+        this.updateActiveEditorReadOnlyState(session, filePath, entry.readonly);
+        if (
+            this.currentSession?.key === session.key
+            && isSupportedMarkdownPath(filePath)
+            && this.currentSession.editorState.activeFilePath === filePath
+        ) {
+            this.scheduleMarkdownPreviewRender(filePath, session);
+        }
+        if (this.currentSession?.key === session.key) {
+            this.renderEditorTabs();
+        }
+    }
+
+    autoMergeRemoteTextFileSnapshot(session, filePath, snapshot, source) {
+        const entry = this.getTextFileEntry(filePath, session);
+        if (!entry || !snapshot || typeof snapshot.content !== 'string') {
+            this.deferRemoteFileConflict(session, filePath, snapshot, source);
+            return false;
+        }
+
+        const result = mergeTextFromBase(
+            entry.content || '',
+            this.getCurrentTextFileContent(filePath, session),
+            snapshot.content
+        );
+        if (!result.clean) {
+            this.deferRemoteFileConflict(session, filePath, snapshot, source);
+            return false;
+        }
+
+        this.applyMergedTextFileSnapshot(
+            session,
+            filePath,
+            entry,
+            snapshot,
+            result.merged
+        );
+        return true;
     }
 
     isActiveTextFile(session, filePath) {
@@ -3136,6 +3411,7 @@ class EditorManager {
         entry.lastDismissedRemoteVersion = '';
         if (!useLocalContent) {
             entry.userEdited = false;
+            this.clearDeferredRemoteFileConflict(entry);
         }
         this.updateActiveEditorReadOnlyState(session, filePath, nextReadonly);
         if (
@@ -3321,7 +3597,7 @@ class EditorManager {
                             force: false
                         }
                     );
-                    await this.resolveTextFileConflict(
+                    this.autoMergeRemoteTextFileSnapshot(
                         session,
                         filePath,
                         result,
@@ -3394,7 +3670,7 @@ class EditorManager {
             const userEdited = dirty && entry.userEdited === true;
             if (message.deleted) {
                 if (userEdited) {
-                    await this.resolveTextFileConflict(
+                    this.deferRemoteFileConflict(
                         session,
                         filePath,
                         {
@@ -3418,7 +3694,7 @@ class EditorManager {
                 continue;
             }
             if (userEdited) {
-                await this.resolveTextFileConflict(
+                this.autoMergeRemoteTextFileSnapshot(
                     session,
                     filePath,
                     snapshot,
@@ -5768,6 +6044,41 @@ class EditorManager {
         this.updateTreeCreateRow(list, dirPath, creatable, git, session);
     }
 
+    loadEditorWordWrapPreference() {
+        try {
+            return localStorage.getItem(EDITOR_WORD_WRAP_STORAGE_KEY) === 'on';
+        } catch {
+            return false;
+        }
+    }
+
+    saveEditorWordWrapPreference() {
+        try {
+            localStorage.setItem(
+                EDITOR_WORD_WRAP_STORAGE_KEY,
+                this.editorWordWrapEnabled ? 'on' : 'off'
+            );
+        } catch {
+            // Ignore storage failures; the runtime option still updates.
+        }
+    }
+
+    getEditorWordWrapOption() {
+        return this.editorWordWrapEnabled ? 'on' : 'off';
+    }
+
+    setEditorWordWrapEnabled(enabled) {
+        this.editorWordWrapEnabled = enabled === true;
+        this.saveEditorWordWrapPreference();
+        this.editor?.updateOptions({
+            wordWrap: this.getEditorWordWrapOption()
+        });
+    }
+
+    toggleEditorWordWrap() {
+        this.setEditorWordWrapEnabled(!this.editorWordWrapEnabled);
+    }
+
     initMonaco() {
         require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' }});
         require(['vs/editor/editor.main'], (monaco) => {
@@ -5781,6 +6092,7 @@ class EditorManager {
                 rulers: [80, 120],
                 fontSize: IS_MOBILE ? 14 : 12,
                 fontFamily: "'Monaspace Neon', \"SF Mono Terminal\", \"SFMono-Regular\", \"SF Mono\", \"JetBrains Mono\", Menlo, Consolas, monospace",
+                wordWrap: this.getEditorWordWrapOption(),
                 scrollBeyondLastLine: false,
             });
             
@@ -5820,6 +6132,15 @@ class EditorManager {
                     this.saveActiveTextFileViaHeartbeat();
                 }
             );
+            this.editor.addAction({
+                id: 'tabminal.toggleWordWrap',
+                label: '自动换行',
+                contextMenuGroupId: 'navigation',
+                contextMenuOrder: 1.5,
+                run: () => {
+                    this.toggleEditorWordWrap();
+                }
+            });
             
             monaco.editor.defineTheme('solarized-dark', {
                 base: 'vs-dark',
@@ -6754,7 +7075,8 @@ class EditorManager {
                 size,
                 mtimeMs,
                 lastDismissedRemoteVersion: '',
-                userEdited: false
+                userEdited: false,
+                pendingRemoteConflict: null
             }, targetSession);
         }
 
@@ -6947,11 +7269,22 @@ class EditorManager {
             if (fileModel && fileModel.readonly) {
                 tab.classList.add('readonly');
             }
+            if (fileModel?.pendingRemoteConflict) {
+                tab.classList.add('remote-conflict');
+                tab.title = 'Remote change could not be merged automatically.';
+            }
             
             const name = path.split('/').pop();
             const icon = document.createElement('span');
             icon.className = 'file-editor-tab-icon';
             icon.innerHTML = this.getIcon(name, false, false);
+
+            if (fileModel?.pendingRemoteConflict) {
+                const conflictMark = document.createElement('span');
+                conflictMark.className = 'remote-conflict-mark';
+                conflictMark.textContent = '!';
+                tab.appendChild(conflictMark);
+            }
 
             const pendingWrite = this.getPendingFileWrite(this.currentSession, path);
             if (pendingWrite && pendingWrite.content !== undefined) {
@@ -15483,15 +15816,6 @@ function buildAgentStructuredContentSections(
                 oldText: item.oldText || '',
                 newText: item.newText || ''
             }));
-        if (shouldLoadDetails) {
-            return [{
-                label: 'Diff',
-                preview: diffPreview || 'Load diff',
-                kind: 'tool-detail-loader',
-                toolCallId: toolCall.toolCallId,
-                detailInclude: 'diff'
-            }];
-        }
         if (loadedDiffs.length > 1) {
             return [{
                 label: 'Diff',
@@ -15510,6 +15834,15 @@ function buildAgentStructuredContentSections(
                 path: diff.path,
                 oldText: diff.oldText || '',
                 newText: diff.newText || ''
+            }];
+        }
+        if (shouldLoadDetails) {
+            return [{
+                label: 'Diff',
+                preview: diffPreview || 'Load diff',
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId,
+                detailInclude: 'diff'
             }];
         }
     }
