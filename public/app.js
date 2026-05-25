@@ -9178,6 +9178,26 @@ class EditorManager {
         );
     }
 
+    getUnavailableAgentDetailText(agentTab, loaderSection, kind) {
+        const include = String(loaderSection?.detailInclude || '').trim();
+        const toolLike = kind === 'tool'
+            ? agentTab?.toolCalls?.get(loaderSection?.toolCallId)
+            : agentTab?.permissions?.get(loaderSection?.permissionId);
+        const statusSource = kind === 'tool' ? toolLike : toolLike?.toolCall;
+        const statusClass = kind === 'tool'
+            ? getEffectiveAgentToolStatus(statusSource, agentTab)
+            : normalizeStatusClass(toolLike?.status || statusSource?.status);
+        const pending = statusClass === 'pending' || statusClass === 'running';
+        if (pending) {
+            if (include === 'diff') return 'Diff is not available yet.';
+            if (include === 'content') return 'Content is not available yet.';
+            return 'Output is not available yet.';
+        }
+        if (include === 'diff') return 'No diff output.';
+        if (include === 'content') return 'No content output.';
+        return 'No output.';
+    }
+
     buildAgentDetailLoaderBody(details, section, kind) {
         const body = document.createElement('div');
         body.className = 'agent-tool-call-body';
@@ -9210,7 +9230,11 @@ class EditorManager {
                     );
                 } else {
                     body.className = 'agent-tool-call-body';
-                    body.textContent = 'Output is not available yet.';
+                    body.textContent = this.getUnavailableAgentDetailText(
+                        agentTab,
+                        section,
+                        kind
+                    );
                 }
             } catch (error) {
                 body.textContent = error?.message || 'Failed to load details.';
@@ -15672,9 +15696,12 @@ function buildAgentPathLinks(agentTab, toolLike) {
 }
 
 function buildAgentToolSummary(toolCall, terminals = null) {
-    void terminals;
     const editDiffLine = buildEditToolCollapsedDiffLine(toolCall);
     if (editDiffLine) return compactAgentSummaryText(editDiffLine);
+    const terminalSummary = compactAgentSummaryText(
+        summarizeAgentTerminalCommands(toolCall, terminals)
+    );
+    if (terminalSummary) return terminalSummary;
     const inputSummary = compactAgentSummaryText(
         summarizeAgentRawInput(toolCall?.rawInput)
     );
@@ -15684,8 +15711,31 @@ function buildAgentToolSummary(toolCall, terminals = null) {
     return '';
 }
 
+function summarizeAgentTerminalCommands(toolCall, terminals = null) {
+    const commands = [];
+    for (const terminalId of getAgentToolTerminalIds(toolCall)) {
+        const terminal = resolveAgentTerminalSummary(terminals, terminalId);
+        const command = String(terminal?.command || '').trim();
+        if (command) {
+            commands.push(command);
+        }
+    }
+    return Array.from(new Set(commands)).join('\n');
+}
+
+function isCompactedRawInputPlaceholder(rawInput) {
+    if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+        return false;
+    }
+    const keys = Object.keys(rawInput);
+    return keys.length > 0
+        && keys.every((key) => key === 'compacted' || key === 'keys')
+        && rawInput.compacted === true;
+}
+
 function summarizeAgentRawInput(rawInput) {
     if (!rawInput || typeof rawInput !== 'object') return '';
+    if (isCompactedRawInputPlaceholder(rawInput)) return '';
     if (typeof rawInput.cmd === 'string' && rawInput.cmd) {
         return rawInput.cmd;
     }
@@ -15886,21 +15936,25 @@ function mergeAgentToolContentItems(previous, incoming) {
     for (const item of incomingItems) {
         const key = getAgentToolContentKey(item);
         if (key) {
-            incomingByKey.set(key, item);
+            if (!incomingByKey.has(key)) {
+                incomingByKey.set(key, []);
+            }
+            incomingByKey.get(key).push(item);
         }
     }
-    const usedKeys = new Set();
+    const usedItems = new Set();
     const merged = previousItems.map((item) => {
         const key = getAgentToolContentKey(item);
-        if (key && incomingByKey.has(key)) {
-            usedKeys.add(key);
-            return incomingByKey.get(key);
+        const matches = key ? incomingByKey.get(key) : null;
+        if (matches?.length > 0) {
+            const nextItem = matches.shift();
+            usedItems.add(nextItem);
+            return nextItem;
         }
         return item;
     });
     for (const item of incomingItems) {
-        const key = getAgentToolContentKey(item);
-        if (!key || !usedKeys.has(key)) {
+        if (!usedItems.has(item)) {
             merged.push(item);
         }
     }
