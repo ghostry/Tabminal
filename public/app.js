@@ -8264,7 +8264,9 @@ class EditorManager {
         this.agentPermissions.style.display = 'none';
 
         this.agentPrompt.disabled = false;
-        this.setAgentPromptValue(agentTab.promptDraft || '', agentTab);
+        this.setAgentPromptValue(agentTab.promptDraft || '', agentTab, {
+            preserveSelection: true
+        });
         this.agentPrompt.placeholder = buildAgentPromptPlaceholder(agentTab);
         this.updateAgentComposerActions(agentTab);
         this.refreshAgentUsageHud();
@@ -8327,11 +8329,15 @@ class EditorManager {
                     && String(entry.value?.role || '').toLowerCase()
                         === 'user';
                 let node = existingByKey.get(timelineKey) || null;
+                let preservedSectionKeys = null;
                 if (node) {
                     existingByKey.delete(timelineKey);
                     if (
                         node.dataset.renderSignature !== renderSignature
                     ) {
+                        preservedSectionKeys = this.captureAgentSectionOpenKeys(
+                            node
+                        );
                         this.disposeAgentTimelineNode(node);
                         node = null;
                     }
@@ -8340,7 +8346,8 @@ class EditorManager {
                     node = this.buildAgentTimelineNode(
                         agentTab,
                         entry,
-                        timelineIndex
+                        timelineIndex,
+                        { openSectionKeys: preservedSectionKeys }
                     );
                 }
                 if (node) {
@@ -8380,7 +8387,7 @@ class EditorManager {
         this.renderAgentTranscript(agentTab, options);
     }
 
-    buildAgentTimelineNode(agentTab, entry, timelineIndex) {
+    buildAgentTimelineNode(agentTab, entry, timelineIndex, options = {}) {
         if (!entry) {
             return null;
         }
@@ -8388,11 +8395,12 @@ class EditorManager {
         if (entry.type === 'message') {
             node = this.buildAgentMessageNode(agentTab, entry.value);
         } else if (entry.type === 'tool') {
-            node = this.buildAgentToolNode(agentTab, entry.value);
+            node = this.buildAgentToolNode(agentTab, entry.value, options);
         } else if (entry.type === 'permission') {
             node = this.buildAgentPermissionNode(
                 agentTab,
-                entry.value
+                entry.value,
+                options
             );
         } else if (entry.type === 'plan') {
             node = this.buildAgentPlanHistoryNode(
@@ -8876,6 +8884,30 @@ class EditorManager {
         }
     }
 
+    captureAgentSectionOpenKeys(node) {
+        const keys = new Set();
+        for (const details of node?.querySelectorAll?.(
+            'details.agent-tool-call-section[open]'
+        ) || []) {
+            const key = details?.dataset?.sectionKey || '';
+            if (key) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
+    getAgentSectionKey(section) {
+        const label = String(section?.label || '').trim();
+        if (section?.terminal?.terminalId) {
+            return `${label}:terminal:${section.terminal.terminalId}`;
+        }
+        if (section?.path) {
+            return `${label}:path:${section.path}`;
+        }
+        return label || String(section?.kind || '');
+    }
+
     unmountAgentSectionBody(bodyHost) {
         if (!bodyHost || bodyHost.dataset.mounted !== 'true') {
             return;
@@ -8896,7 +8928,7 @@ class EditorManager {
         );
     }
 
-    bindAgentSectionDetails(details, bodyHost, section) {
+    bindAgentSectionDetails(details, bodyHost, section, options = {}) {
         details.addEventListener('toggle', () => {
             if (details.open) {
                 this.closeSiblingAgentSections(details);
@@ -8905,9 +8937,13 @@ class EditorManager {
                 this.unmountAgentSectionBody(bodyHost);
             }
         });
+        if (options.open) {
+            details.open = true;
+            this.mountAgentSectionBody(details, bodyHost, section);
+        }
     }
 
-    buildAgentToolNode(agentTab, toolCall) {
+    buildAgentToolNode(agentTab, toolCall, options = {}) {
         const node = document.createElement('div');
         const toolStatusClass = getEffectiveAgentToolStatus(
             toolCall,
@@ -8965,6 +9001,8 @@ class EditorManager {
             for (const section of sections) {
                 const details = document.createElement('details');
                 details.className = 'agent-tool-call-section';
+                const sectionKey = this.getAgentSectionKey(section);
+                details.dataset.sectionKey = sectionKey;
                 const summary = document.createElement('summary');
                 summary.appendChild(
                     buildAgentSectionSummaryLabel(section.label)
@@ -8982,7 +9020,9 @@ class EditorManager {
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
                 details.appendChild(bodyHost);
-                this.bindAgentSectionDetails(details, bodyHost, section);
+                this.bindAgentSectionDetails(details, bodyHost, section, {
+                    open: options.openSectionKeys?.has(sectionKey)
+                });
                 sectionContainer.appendChild(details);
             }
             node.appendChild(sectionContainer);
@@ -8991,7 +9031,7 @@ class EditorManager {
         return node;
     }
 
-    buildAgentPermissionNode(agentTab, permission) {
+    buildAgentPermissionNode(agentTab, permission, options = {}) {
         const card = document.createElement('div');
         const permissionStatusClass = normalizeStatusClass(
             permission.status || 'pending'
@@ -9064,6 +9104,8 @@ class EditorManager {
             for (const section of sections) {
                 const details = document.createElement('details');
                 details.className = 'agent-tool-call-section';
+                const sectionKey = this.getAgentSectionKey(section);
+                details.dataset.sectionKey = sectionKey;
                 const summary = document.createElement('summary');
                 summary.appendChild(
                     buildAgentSectionSummaryLabel(section.label)
@@ -9081,7 +9123,9 @@ class EditorManager {
                 const bodyHost = document.createElement('div');
                 bodyHost.className = 'agent-tool-call-section-content';
                 details.appendChild(bodyHost);
-                this.bindAgentSectionDetails(details, bodyHost, section);
+                this.bindAgentSectionDetails(details, bodyHost, section, {
+                    open: options.openSectionKeys?.has(sectionKey)
+                });
                 sectionContainer.appendChild(details);
             }
             card.appendChild(sectionContainer);
@@ -10424,16 +10468,34 @@ class EditorManager {
     }
 
     setAgentPromptValue(value, agentTab = null, options = {}) {
+        const wasFocused = document.activeElement === this.agentPrompt;
+        const previousValue = this.agentPrompt.value;
+        const previousSelectionStart = this.agentPrompt.selectionStart;
+        const previousSelectionEnd = this.agentPrompt.selectionEnd;
         this.isApplyingAgentPromptState = true;
         this.suppressAgentCommandMenu = !!options.suppressCommandMenu;
-        this.agentPrompt.value = value;
+        if (previousValue !== value) {
+            this.agentPrompt.value = value;
+        }
         if (agentTab && !options.preserveDraft) {
             agentTab.promptDraft = value;
         }
         this.hideAgentCommandMenu();
         this.updateAgentComposerActions(agentTab);
-        const cursor = this.agentPrompt.value.length;
-        this.agentPrompt.setSelectionRange(cursor, cursor);
+        if (options.preserveSelection && wasFocused) {
+            const selectionStart = Math.min(
+                previousSelectionStart ?? this.agentPrompt.value.length,
+                this.agentPrompt.value.length
+            );
+            const selectionEnd = Math.min(
+                previousSelectionEnd ?? selectionStart,
+                this.agentPrompt.value.length
+            );
+            this.agentPrompt.setSelectionRange(selectionStart, selectionEnd);
+        } else if (!options.preserveSelection) {
+            const cursor = this.agentPrompt.value.length;
+            this.agentPrompt.setSelectionRange(cursor, cursor);
+        }
         this.suppressAgentCommandMenu = false;
         this.isApplyingAgentPromptState = false;
     }
@@ -17416,7 +17478,7 @@ async function syncAgentsForServer(server, { force = false } = {}) {
     if (!force && server.agentStateLoaded) return;
 
     const params = new URLSearchParams();
-    const wantsFull = !server.agentStateLoaded;
+    const wantsFull = force || !server.agentStateLoaded;
     if (wantsFull) {
         params.set('full', '1');
     } else {
