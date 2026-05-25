@@ -2618,6 +2618,8 @@ class AcpRuntime extends EventEmitter {
             syntheticStreams: new Map(),
             syntheticStreamTurn: 0,
             pendingUserEcho: null,
+            pendingUserEchoes: [],
+            activePromptCount: 0,
             restoreCapture: null,
             currentModeId,
             availableModes,
@@ -3015,6 +3017,8 @@ class AcpRuntime extends EventEmitter {
         tab.syntheticStreams = new Map();
         tab.syntheticStreamTurn = 0;
         tab.pendingUserEcho = null;
+        tab.pendingUserEchoes = [];
+        tab.activePromptCount = 0;
         tab.plan = [];
         tab.usage = null;
         tab.terminals = new Map();
@@ -3039,6 +3043,8 @@ class AcpRuntime extends EventEmitter {
         tab.errorMessage = snapshot.errorMessage || '';
         tab.syntheticStreams = new Map();
         tab.pendingUserEcho = null;
+        tab.pendingUserEchoes = [];
+        tab.activePromptCount = 0;
         tab.restoreCapture = null;
         restorePersistedTabSnapshot(tab, snapshot);
     }
@@ -3340,9 +3346,6 @@ class AcpRuntime extends EventEmitter {
         if (!tab) {
             throw new Error('Agent tab not found');
         }
-        if (tab.busy) {
-            throw new Error('Agent tab is already running');
-        }
         const promptText = typeof text === 'string' ? text : '';
         const promptAttachments = Array.isArray(attachments)
             ? attachments.map((attachment) => normalizePromptAttachment(attachment))
@@ -3351,6 +3354,7 @@ class AcpRuntime extends EventEmitter {
             promptText,
             promptAttachments
         );
+        tab.activePromptCount = Math.max(0, tab.activePromptCount || 0) + 1;
         tab.errorMessage = '';
         tab.busy = true;
         tab.status = 'running';
@@ -3364,12 +3368,16 @@ class AcpRuntime extends EventEmitter {
                 serializePromptAttachment(attachment)
             )
         });
-        tab.pendingUserEcho = promptText
-            ? {
+        if (!Array.isArray(tab.pendingUserEchoes)) {
+            tab.pendingUserEchoes = [];
+        }
+        if (promptText) {
+            tab.pendingUserEchoes.push({
                 text: promptText,
                 matched: 0
-            }
-            : null;
+            });
+        }
+        tab.pendingUserEcho = tab.pendingUserEchoes[0] || null;
         this.#broadcast(tab, {
             type: 'status',
             status: tab.status,
@@ -3385,8 +3393,9 @@ class AcpRuntime extends EventEmitter {
 
         void promptPromise.then(async (response) => {
             if (!this.tabs.has(tabId)) return;
-            tab.busy = false;
-            tab.status = 'ready';
+            tab.activePromptCount = Math.max(0, (tab.activePromptCount || 1) - 1);
+            tab.busy = tab.activePromptCount > 0;
+            tab.status = tab.busy ? 'running' : 'ready';
             this.#settleStaleToolCalls(
                 tab,
                 response?.stopReason === 'cancelled'
@@ -3403,31 +3412,38 @@ class AcpRuntime extends EventEmitter {
                 });
             }
             tab.syntheticStreams.clear();
-            tab.pendingUserEcho = null;
+            if (!tab.busy) {
+                tab.pendingUserEchoes = [];
+                tab.pendingUserEcho = null;
+            }
             const hydratedChanges = await this.#hydrateFreshSessionMetadata(tab);
             this.#broadcastHydratedSessionMetadata(tab, hydratedChanges);
             this.#broadcast(tab, {
                 type: 'complete',
                 stopReason: response.stopReason,
                 status: tab.status,
-                busy: false
+                busy: tab.busy
             });
             this.#markTabDirty(tab);
         }).catch((error) => {
             if (!this.tabs.has(tabId)) return;
-            tab.busy = false;
-            tab.status = 'error';
+            tab.activePromptCount = Math.max(0, (tab.activePromptCount || 1) - 1);
+            tab.busy = tab.activePromptCount > 0;
+            tab.status = tab.busy ? 'running' : 'error';
             this.#settleStaleToolCalls(tab, 'error');
             tab.errorMessage = formatAgentStartupError(
                 tab.definition,
                 error
             );
             tab.syntheticStreams.clear();
-            tab.pendingUserEcho = null;
+            if (!tab.busy) {
+                tab.pendingUserEchoes = [];
+                tab.pendingUserEcho = null;
+            }
             this.#broadcast(tab, {
                 type: 'status',
                 status: tab.status,
-                busy: false,
+                busy: tab.busy,
                 errorMessage: tab.errorMessage
             });
             this.#markTabDirty(tab);
@@ -3859,20 +3875,35 @@ class AcpRuntime extends EventEmitter {
     }
 
     #consumeUserEcho(tab, text) {
-        const pending = tab.pendingUserEcho;
+        const queue = Array.isArray(tab.pendingUserEchoes)
+            ? tab.pendingUserEchoes
+            : [];
+        const pending = queue[0] || tab.pendingUserEcho;
         if (!pending || !text) {
             return false;
         }
 
         const remaining = pending.text.slice(pending.matched);
         if (!remaining.startsWith(text)) {
-            tab.pendingUserEcho = null;
+            if (queue.length > 0) {
+                queue.shift();
+                tab.pendingUserEcho = queue[0] || null;
+            } else {
+                tab.pendingUserEcho = null;
+            }
             return false;
         }
 
         pending.matched += text.length;
         if (pending.matched >= pending.text.length) {
-            tab.pendingUserEcho = null;
+            if (queue.length > 0) {
+                queue.shift();
+                tab.pendingUserEcho = queue[0] || null;
+            } else {
+                tab.pendingUserEcho = null;
+            }
+        } else {
+            tab.pendingUserEcho = pending;
         }
         return true;
     }

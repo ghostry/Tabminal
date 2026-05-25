@@ -2066,6 +2066,8 @@ class EditorManager {
         this.agentScrollBottomButton = null;
         this.agentAttachmentList = null;
         this.agentSendButton = null;
+        this.agentSendMenuButton = null;
+        this.agentSendMenu = null;
         this.agentHint = null;
         this.agentFixedActions = null;
         this.agentCommandMenu = null;
@@ -2849,7 +2851,7 @@ class EditorManager {
 
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
                 event.preventDefault();
-                void this.submitActiveAgentPrompt();
+                void this.submitActiveAgentPrompt({ mode: 'queue' });
             }
         });
 
@@ -2904,13 +2906,54 @@ class EditorManager {
             void this.submitActiveAgentPrompt();
         });
 
+        const sendGroup = document.createElement('div');
+        sendGroup.className = 'agent-send-group';
+        sendGroup.appendChild(this.agentSendButton);
+
+        this.agentSendMenuButton = document.createElement('button');
+        this.agentSendMenuButton.type = 'button';
+        this.agentSendMenuButton.className =
+            'agent-panel-button agent-send-menu-button';
+        this.agentSendMenuButton.innerHTML = CHEVRON_DOWN_ICON_SVG;
+        this.agentSendMenuButton.title = 'Send options';
+        this.agentSendMenuButton.setAttribute('aria-label', 'Send options');
+        this.agentSendMenuButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.toggleAgentSendMenu();
+        });
+        sendGroup.appendChild(this.agentSendMenuButton);
+
+        this.agentSendMenu = document.createElement('div');
+        this.agentSendMenu.className = 'agent-send-menu';
+        this.agentSendMenu.style.display = 'none';
+
+        const queueSendButton = document.createElement('button');
+        queueSendButton.type = 'button';
+        queueSendButton.className = 'agent-send-menu-item';
+        queueSendButton.textContent = 'Queue locally';
+        queueSendButton.title = 'Queue locally (Ctrl+Enter)';
+        queueSendButton.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            this.closeAgentSendMenu();
+            void this.submitActiveAgentPrompt({ mode: 'queue' });
+        });
+        this.agentSendMenu.appendChild(queueSendButton);
+        sendGroup.appendChild(this.agentSendMenu);
+        document.addEventListener('click', (event) => {
+            if (!sendGroup.contains(event.target)) {
+                this.closeAgentSendMenu();
+            }
+        });
+
         this.agentFixedActions.appendChild(this.agentScrollBottomButton);
         this.agentFixedActions.appendChild(this.agentModelSelectShell);
         this.agentFixedActions.appendChild(this.agentThoughtSelectShell);
         this.agentFixedActions.appendChild(this.agentModeSelectShell);
         this.agentFixedActions.appendChild(this.agentSetupButton);
         this.agentFixedActions.appendChild(this.agentAttachmentButton);
-        this.agentFixedActions.appendChild(this.agentSendButton);
+        this.agentFixedActions.appendChild(sendGroup);
 
         actions.appendChild(this.agentCommands);
         actions.appendChild(this.agentFixedActions);
@@ -9692,11 +9735,24 @@ class EditorManager {
         return host;
     }
 
-    async submitActiveAgentPrompt() {
+    closeAgentSendMenu() {
+        if (this.agentSendMenu) {
+            this.agentSendMenu.style.display = 'none';
+        }
+    }
+
+    toggleAgentSendMenu() {
+        if (!this.agentSendMenu) return;
+        const isOpen = this.agentSendMenu.style.display !== 'none';
+        this.agentSendMenu.style.display = isOpen ? 'none' : 'block';
+    }
+
+    async submitActiveAgentPrompt(options = {}) {
         const activeTabKey = this.getActiveWorkspaceTabKey();
         if (!isAgentWorkspaceTabKey(activeTabKey)) return;
         const agentTab = state.agentTabs.get(activeTabKey);
         if (!agentTab) return;
+        const mode = options.mode === 'queue' ? 'queue' : 'send';
         const text = this.agentPrompt.value.trim();
         const attachments = Array.isArray(agentTab.pendingAttachments)
             ? [...agentTab.pendingAttachments]
@@ -9713,12 +9769,12 @@ class EditorManager {
             return;
         }
         if (!text && attachments.length === 0) {
-            if (canAutostartQueuedAgentPrompt(agentTab)) {
+            if (mode === 'send' && canAutostartQueuedAgentPrompt(agentTab)) {
                 await drainQueuedAgentPrompt(agentTab);
             }
             return;
         }
-        if (agentTab.busy) {
+        if (mode === 'queue' && agentTab.busy) {
             this.queueAgentPrompt(agentTab, text, attachments);
             agentTab.pendingAttachments = [];
             this.setAgentPromptValue('', agentTab);
@@ -9727,14 +9783,15 @@ class EditorManager {
         }
         try {
             agentTab.lastSubmittedPrompt = text;
+            agentTab.busy = true;
+            agentTab.status = 'running';
+            this.renderAgentPanel(agentTab);
             await agentTab.sendPrompt(text, attachments);
             if (text) {
                 this.recordAgentPromptHistory(agentTab, text);
             }
             agentTab.pendingAttachments = [];
             this.setAgentPromptValue('', agentTab);
-            agentTab.busy = true;
-            agentTab.status = 'running';
             this.renderAgentPanel(agentTab);
         } catch (error) {
             alert(error.message, {
@@ -9871,6 +9928,10 @@ class EditorManager {
             && !hasAttachments;
         if (!this.agentPrompt.value.trim() && !hasAttachments && hasQueuedPrompts) {
             this.agentSendButton.disabled = false;
+        }
+        if (this.agentSendMenuButton) {
+            this.agentSendMenuButton.disabled = !this.agentPrompt.value.trim()
+                && !hasAttachments;
         }
         this.agentAttachmentButton.disabled = false;
         this.agentSetupButton.style.display = needsSetup ? '' : 'none';
@@ -10574,7 +10635,7 @@ class EditorManager {
 const AGENT_PROMPT_PLACEHOLDER = [
     'Life! The Universe! Everything!',
     '# Host:/path · Mode · Ready',
-    '# / for commands, ⇧⏎ or ⌃J inserts a newline.'
+    '# / for commands, ⇧⏎ inserts a newline, ⌃⏎ queues locally.'
 ];
 
 const editorManager = new EditorManager();
@@ -10950,9 +11011,10 @@ async function saveAgentSetupConfig() {
             });
             closeAgentSetupModal();
             if (nextAgentTab && retryPromptText) {
-                await nextAgentTab.sendPrompt(retryPromptText);
                 nextAgentTab.busy = true;
                 nextAgentTab.status = 'running';
+                nextAgentTab.notifyUi();
+                await nextAgentTab.sendPrompt(retryPromptText);
                 nextAgentTab.notifyUi();
             }
             return;
@@ -13472,6 +13534,9 @@ async function drainQueuedAgentPrompt(agentTab) {
     agentTab.isDrainingQueuedPrompt = true;
     try {
         agentTab.lastSubmittedPrompt = nextPrompt.text;
+        agentTab.busy = true;
+        agentTab.status = 'running';
+        agentTab.notifyUi();
         await agentTab.sendPrompt(
             nextPrompt.text,
             Array.isArray(nextPrompt.attachments)
@@ -13482,8 +13547,6 @@ async function drainQueuedAgentPrompt(agentTab) {
             editorManager.recordAgentPromptHistory(agentTab, nextPrompt.text);
         }
         agentTab.queuedPrompts.shift();
-        agentTab.busy = true;
-        agentTab.status = 'running';
     } catch (error) {
         alert(error.message, {
             type: 'error',
@@ -14444,7 +14507,7 @@ function buildAgentPromptPlaceholder(agentTab) {
         statusLabel
     ].filter(Boolean).join(' · ');
     const helperLine = feedback?.hotkey
-        ? `# / for commands, ${feedback.hotkey} ⇧⏎ or ⌃J inserts a newline.`
+        ? `# / for commands, ${feedback.hotkey} ⇧⏎ newline, ⌃⏎ queue.`
         : AGENT_PROMPT_PLACEHOLDER[2];
     return [
         AGENT_PROMPT_PLACEHOLDER[0],

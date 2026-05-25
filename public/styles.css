@@ -3149,6 +3149,58 @@ kbd {
     display: block;
 }
 
+.agent-send-group {
+    position: relative;
+    display: inline-flex;
+    align-items: stretch;
+}
+
+.agent-send-group .agent-panel-button {
+    border-radius: 8px 0 0 8px;
+}
+
+.agent-send-menu-button {
+    width: 30px;
+    padding: 8px 7px;
+    border-left: 0;
+    border-radius: 0 8px 8px 0 !important;
+}
+
+.agent-send-menu-button svg {
+    display: block;
+}
+
+.agent-send-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    min-width: 150px;
+    padding: 5px;
+    border: 1px solid rgba(131, 148, 150, 0.28);
+    border-radius: 8px;
+    background: rgba(0, 43, 54, 0.96);
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+    z-index: 40;
+}
+
+.agent-send-menu-item {
+    width: 100%;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-highlight);
+    padding: 7px 8px;
+    text-align: left;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.agent-send-menu-item:hover,
+.agent-send-menu-item:focus-visible {
+    background: rgba(38, 139, 210, 0.18);
+    outline: none;
+}
+
 .agent-panel-button:disabled,
 .agent-panel-mode-select:disabled {
     cursor: not-allowed;
