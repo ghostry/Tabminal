@@ -12,6 +12,7 @@ import {
     ensureRenameTargetAvailable,
     isSupportedTextBuffer,
     readTextFileSnapshot,
+    readGitStatusSummary,
     resetGitTrackedFile,
     writeTextFileSnapshot
 } from '../src/fs-routes.mjs';
@@ -195,6 +196,56 @@ describe('FS text snapshot versioning', () => {
 });
 
 describe('FS git reset', () => {
+    it('returns push status summary without listing files', async () => {
+        const tempDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'tabminal-fs-routes-')
+        );
+        try {
+            const repoDir = path.join(tempDir, 'repo');
+            const remoteDir = path.join(tempDir, 'remote.git');
+            await fs.mkdir(repoDir, { recursive: true });
+
+            await execFileAsync('git', ['init', '--bare', remoteDir]);
+            await execFileAsync('git', ['init'], { cwd: repoDir });
+            await execFileAsync(
+                'git',
+                ['config', 'user.email', 'tabminal@example.invalid'],
+                { cwd: repoDir }
+            );
+            await execFileAsync(
+                'git',
+                ['config', 'user.name', 'Tabminal Test'],
+                { cwd: repoDir }
+            );
+            await execFileAsync('git', ['remote', 'add', 'origin', remoteDir], {
+                cwd: repoDir
+            });
+            await fs.writeFile(path.join(repoDir, 'sample.txt'), 'one\n');
+            await execFileAsync('git', ['add', 'sample.txt'], { cwd: repoDir });
+            await execFileAsync('git', ['commit', '-m', 'one'], {
+                cwd: repoDir
+            });
+            await execFileAsync(
+                'git',
+                ['push', '-u', 'origin', 'HEAD'],
+                { cwd: repoDir }
+            );
+
+            await fs.writeFile(path.join(repoDir, 'sample.txt'), 'two\n');
+            await execFileAsync('git', ['commit', '-am', 'two'], {
+                cwd: repoDir
+            });
+
+            const status = await readGitStatusSummary(tempDir, 'repo');
+
+            assert.deepEqual(status, {
+                hasPushableChanges: true
+            });
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
+    });
+
     it('resets staged tracked changes from a nested repo path', async () => {
         const tempDir = await fs.mkdtemp(
             path.join(os.tmpdir(), 'tabminal-fs-routes-')

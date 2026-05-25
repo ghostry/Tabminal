@@ -316,6 +316,22 @@ async function getGitStatusMap(dirPath) {
     }
 }
 
+export async function readGitStatusSummary(baseDir, targetPath) {
+    const fullPath = resolvePath(baseDir, targetPath || '.');
+    const stats = await fs.stat(fullPath);
+    const gitData = await getGitStatusMap(
+        stats.isDirectory() ? fullPath : path.dirname(fullPath)
+    );
+    if (!gitData) {
+        return {
+            hasPushableChanges: false
+        };
+    }
+    return {
+        hasPushableChanges: (gitData.ahead || 0) > 0
+    };
+}
+
 export async function resetGitTrackedFile(baseDir, targetPath) {
     const absPath = path.resolve(baseDir, targetPath);
     const revParse = await execFileAsync(
@@ -500,6 +516,17 @@ export const setupFsRoutes = (router) => {
         } catch (err) {
             console.error('FS List Error:', err);
             ctx.status = 500;
+            ctx.body = { error: err.message };
+        }
+    });
+
+    router.get('/api/fs/git-status', async (ctx) => {
+        const targetPath = ctx.query.path || '.';
+        try {
+            ctx.body = await readGitStatusSummary(baseDir, targetPath);
+        } catch (err) {
+            console.error('FS Git Status Error:', err);
+            ctx.status = err?.status || 500;
             ctx.body = { error: err.message };
         }
     });

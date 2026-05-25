@@ -726,7 +726,7 @@ body {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    opacity: 0;
+    opacity: 1;
     transition: all 0.2s ease;
     z-index: 10;
     font-size: 18px;
@@ -1714,9 +1714,7 @@ kbd {
 .file-tree-reset-btn,
 .file-tree-diff-btn,
 .file-tree-new-folder-btn,
-.file-tree-new-file-btn,
-.file-tree-git-pull-btn,
-.file-tree-git-push-btn {
+.file-tree-new-file-btn {
     display: none;
     border: 1px solid rgba(38, 139, 210, 0.28);
     border-radius: 999px;
@@ -1771,9 +1769,7 @@ kbd {
 .file-tree-reset-btn:disabled,
 .file-tree-diff-btn:disabled,
 .file-tree-new-folder-btn:disabled,
-.file-tree-new-file-btn:disabled,
-.file-tree-git-pull-btn:disabled,
-.file-tree-git-push-btn:disabled {
+.file-tree-new-file-btn:disabled {
     display: none;
 }
 
@@ -1782,9 +1778,7 @@ kbd {
 .file-tree-delete-btn[hidden],
 .file-tree-diff-btn[hidden],
 .file-tree-new-folder-btn[hidden],
-.file-tree-new-file-btn[hidden],
-.file-tree-git-pull-btn[hidden],
-.file-tree-git-push-btn[hidden] {
+.file-tree-new-file-btn[hidden] {
     display: none !important;
 }
 
@@ -1802,29 +1796,10 @@ kbd {
 }
 
 .file-tree-create-actions .file-tree-new-folder-btn,
-.file-tree-create-actions .file-tree-new-file-btn,
-.file-tree-create-actions .file-tree-git-pull-btn,
-.file-tree-create-actions .file-tree-git-push-btn {
+.file-tree-create-actions .file-tree-new-file-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-}
-
-.file-tree-git-pull-btn {
-    border-color: rgba(133, 153, 0, 0.28);
-    background: rgba(133, 153, 0, 0.12);
-    color: #859900;
-}
-
-.file-tree-git-push-btn {
-    border-color: rgba(38, 139, 210, 0.28);
-    background: rgba(38, 139, 210, 0.12);
-    color: #268bd2;
-}
-
-.file-tree-git-pull-btn.is-loading svg,
-.file-tree-git-push-btn.is-loading svg {
-    animation: tabminal-spin 0.6s linear 1;
 }
 
 .file-tree-rename-input {
@@ -4231,8 +4206,7 @@ kbd {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    opacity: 0;
-    /* Default Hidden */
+    opacity: 1;
     transition: all 0.2s ease;
     z-index: 10;
     font-size: 14px;
@@ -4256,12 +4230,82 @@ kbd {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    opacity: 0;
+    opacity: 1;
     transition: all 0.2s ease;
     z-index: 10;
     font-size: 14px;
     padding: 0;
     line-height: 1;
+}
+
+.tab-git-actions {
+    position: absolute;
+    top: 4px;
+    right: 68px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    opacity: 1;
+    transition: opacity 0.2s ease;
+    z-index: 10;
+}
+
+.tab-git-actions[hidden] {
+    display: none !important;
+}
+
+.tab-git-action-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+    background-color: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 14px;
+    padding: 0;
+    line-height: 1;
+}
+
+.tab-git-action-btn[hidden],
+.tab-git-action-btn:disabled {
+    display: none !important;
+}
+
+.tab-git-pull-btn {
+    color: #859900;
+}
+
+.tab-git-push-btn {
+    color: #268bd2;
+}
+
+.tab-git-action-btn:hover {
+    background-color: rgba(0, 0, 0, 0.8);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+.tab-git-pull-btn:hover {
+    border-color: rgba(133, 153, 0, 0.72);
+    box-shadow: inset 0 0 10px rgba(133, 153, 0, 0.2);
+}
+
+.tab-git-push-btn:hover {
+    border-color: rgba(38, 139, 210, 0.72);
+    box-shadow: inset 0 0 10px rgba(38, 139, 210, 0.2);
+}
+
+.tab-git-action-btn:active {
+    transform: translateY(1px);
+}
+
+.tab-git-action-btn.is-loading svg {
+    animation: tabminal-spin 0.6s linear 1;
 }
 
 .tab-item:hover .toggle-agent-btn,
@@ -4311,7 +4355,7 @@ kbd {
 }
 
 .tab-item.active:hover .toggle-editor-btn {
-    opacity: 0.8;
+    opacity: 1;
 }
 
 .toggle-editor-btn:active {

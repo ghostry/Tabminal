@@ -5364,6 +5364,102 @@ class EditorManager {
         this.diffEditorFilePath = '';
     }
 
+    applySessionTabGitActions(session, git = null) {
+        if (!session?.key) return;
+        const tab = tabListEl.querySelector(
+            `[data-session-key="${CSS.escape(session.key)}"]`
+        );
+        const gitActions = tab?.querySelector('.tab-git-actions');
+        const gitPullButton = tab?.querySelector('.tab-git-pull-btn');
+        const gitPushButton = tab?.querySelector('.tab-git-push-btn');
+        if (!(gitActions instanceof HTMLElement) || !tab.isConnected) return;
+
+        const dirPath = session.cwd || session.initialCwd || '';
+        const hasDirPath = dirPath.length > 0;
+        const pathChanged = gitActions.dataset.path !== dirPath;
+        gitActions.dataset.path = dirPath;
+        gitActions.hidden = !hasDirPath;
+        if (pathChanged) {
+            delete gitActions.dataset.gitLoaded;
+            delete gitActions.dataset.gitLoadedPath;
+        }
+        if (git !== null) {
+            gitActions.dataset.gitLoaded = '1';
+            gitActions.dataset.gitLoadedPath = dirPath;
+        }
+
+        if (gitPullButton instanceof HTMLButtonElement) {
+            gitPullButton.hidden = !hasDirPath;
+            gitPullButton.setAttribute('aria-label', `Git pull ${dirPath}`);
+            gitPullButton.onmousedown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            };
+            gitPullButton.onclick = (event) => {
+                event.stopPropagation();
+                void this.gitPullTree(session, dirPath, gitPullButton);
+            };
+        }
+
+        if (gitPushButton instanceof HTMLButtonElement) {
+            if (pathChanged || git) {
+                gitPushButton.hidden = !git?.hasPushableChanges;
+            }
+            gitPushButton.setAttribute('aria-label', `Git push ${dirPath}`);
+            gitPushButton.onmousedown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            };
+            gitPushButton.onclick = (event) => {
+                event.stopPropagation();
+                void this.gitPushTree(session, dirPath, gitPushButton);
+            };
+        }
+    }
+
+    requestSessionTabGitActionsRefresh(session, { force = false } = {}) {
+        if (!session?.cwd || !session.server?.isAuthenticated) return;
+        const tab = tabListEl.querySelector(
+            `[data-session-key="${CSS.escape(session.key)}"]`
+        );
+        const gitActions = tab?.querySelector('.tab-git-actions');
+        if (!(gitActions instanceof HTMLElement) || !tab.isConnected) return;
+        const dirPath = session.cwd;
+        const loaded = (
+            gitActions.dataset.gitLoaded === '1'
+            && gitActions.dataset.gitLoadedPath === dirPath
+        );
+        if (!force && loaded) return;
+        if (gitActions.dataset.gitLoading === '1') return;
+        gitActions.dataset.gitLoading = '1';
+        void this.refreshSessionTabGitActions(session).finally(() => {
+            delete gitActions.dataset.gitLoading;
+        });
+    }
+
+    async refreshSessionTabGitActions(session) {
+        if (!session?.cwd) {
+            this.applySessionTabGitActions(session);
+            return;
+        }
+        const dirPath = session.cwd;
+        this.applySessionTabGitActions(session);
+        try {
+            const response = await session.server.fetch(
+                `/api/fs/git-status?path=${encodeURIComponent(dirPath)}`
+            );
+            if (!response.ok) {
+                await throwResponseError(response, 'Failed to load git status');
+            }
+            const git = await response.json();
+            if (session.cwd === dirPath) {
+                this.applySessionTabGitActions(session, git || null);
+            }
+        } catch {
+            // Keep the pull action available even if git metadata is unavailable.
+        }
+    }
+
     async gitPullTree(session, dirPath, button) {
         button.disabled = true;
         button.classList.add('is-loading');
@@ -5378,6 +5474,7 @@ class EditorManager {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
             this.requestSessionTreeRefresh(session);
+            this.requestSessionTabGitActionsRefresh(session, { force: true });
             alert(data.output || 'Already up to date.', { title: 'Git Pull' });
         } catch (err) {
             alert(err.message || 'git pull failed', { type: 'error', title: 'Git Pull' });
@@ -5401,6 +5498,7 @@ class EditorManager {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
             this.requestSessionTreeRefresh(session);
+            this.requestSessionTabGitActionsRefresh(session, { force: true });
             alert(data.output || 'Everything up-to-date.', { title: 'Git Push' });
         } catch (err) {
             alert(err.message || 'git push failed', { type: 'error', title: 'Git Push' });
@@ -5541,20 +5639,6 @@ class EditorManager {
             newFileButton.innerHTML = NEW_FILE_ICON_SVG;
             actions.appendChild(newFileButton);
 
-            const gitPullButton = document.createElement('button');
-            gitPullButton.type = 'button';
-            gitPullButton.className = 'file-tree-git-pull-btn';
-            gitPullButton.title = 'Git Pull';
-            gitPullButton.innerHTML = GIT_PULL_ICON_SVG;
-            actions.appendChild(gitPullButton);
-
-            const gitPushButton = document.createElement('button');
-            gitPushButton.type = 'button';
-            gitPushButton.className = 'file-tree-git-push-btn';
-            gitPushButton.title = 'Git Push';
-            gitPushButton.innerHTML = GIT_PUSH_ICON_SVG;
-            actions.appendChild(gitPushButton);
-
             row.appendChild(actions);
         }
 
@@ -5589,32 +5673,8 @@ class EditorManager {
         }
 
         const isRootDir = dirPath === session.cwd;
-        const hasPushableChanges = !!git?.hasPushableChanges;
-        const gitPullButton = row.querySelector('.file-tree-git-pull-btn');
-        const gitPushButton = row.querySelector('.file-tree-git-push-btn');
-
-        if (gitPullButton instanceof HTMLButtonElement) {
-            gitPullButton.hidden = !isRootDir;
-            gitPullButton.onmousedown = (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-            };
-            gitPullButton.onclick = (event) => {
-                event.stopPropagation();
-                void this.gitPullTree(session, dirPath, gitPullButton);
-            };
-        }
-
-        if (gitPushButton instanceof HTMLButtonElement) {
-            gitPushButton.hidden = !isRootDir || !hasPushableChanges;
-            gitPushButton.onmousedown = (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-            };
-            gitPushButton.onclick = (event) => {
-                event.stopPropagation();
-                void this.gitPushTree(session, dirPath, gitPushButton);
-            };
+        if (isRootDir) {
+            this.applySessionTabGitActions(session, git);
         }
 
         list.appendChild(row);
@@ -11690,6 +11750,8 @@ class Session {
             AGENT_ICON_SVG,
             getSessionAgentIndicatorState(this)
         );
+        editorManager.applySessionTabGitActions(this);
+        editorManager.requestSessionTabGitActionsRefresh(this);
 
         const metaEl = tab.querySelector('.meta-cwd');
         if (metaEl) {
@@ -18330,6 +18392,27 @@ function createTabElement(session) {
         editorManager.toggle(session);
     };
     tab.appendChild(toggleEditorBtn);
+
+    const gitActions = document.createElement('div');
+    gitActions.className = 'tab-git-actions';
+    gitActions.hidden = true;
+
+    const gitPullBtn = document.createElement('button');
+    gitPullBtn.type = 'button';
+    gitPullBtn.className = 'tab-git-action-btn tab-git-pull-btn';
+    gitPullBtn.title = 'Git Pull';
+    gitPullBtn.innerHTML = GIT_PULL_ICON_SVG;
+    gitActions.appendChild(gitPullBtn);
+
+    const gitPushBtn = document.createElement('button');
+    gitPushBtn.type = 'button';
+    gitPushBtn.className = 'tab-git-action-btn tab-git-push-btn';
+    gitPushBtn.title = 'Git Push';
+    gitPushBtn.hidden = true;
+    gitPushBtn.innerHTML = GIT_PUSH_ICON_SVG;
+    gitActions.appendChild(gitPushBtn);
+
+    tab.appendChild(gitActions);
 
     const agentBtn = document.createElement('button');
     agentBtn.className = 'toggle-agent-btn';
