@@ -57,6 +57,7 @@ clearDeprecatedPasswordHashAuthStorage();
 const IS_MOBILE = navigator.maxTouchPoints > 0;
 
 const AGENT_MESSAGE_MAX_RENDER_BYTES = 64 * 1024;
+const AGENT_BUSY_SYNC_DELAY_MS = 3000;
 
 // #region DOM Elements
 const terminalEl = document.getElementById('terminal');
@@ -9331,9 +9332,16 @@ class EditorManager {
                 toolCall,
                 agentTab.terminals
             );
+            const renderToolCall = include
+                ? {
+                    ...toolCall,
+                    detailsLoaded: true,
+                    detailsAvailable: false
+                }
+                : toolCall;
             return this.findLoadedAgentDetailSection(
                 buildAgentToolSections(
-                    toolCall,
+                    renderToolCall,
                     summaryText,
                     agentTab.terminals,
                     { includeInputSection: false }
@@ -9355,9 +9363,19 @@ class EditorManager {
             permission,
             agentTab.terminals
         );
+        const renderPermission = include
+            ? {
+                ...permission,
+                toolCall: {
+                    ...(permission.toolCall || {}),
+                    detailsLoaded: true,
+                    detailsAvailable: false
+                }
+            }
+            : permission;
         return this.findLoadedAgentDetailSection(
             buildAgentPermissionSections(
-                permission,
+                renderPermission,
                 summaryText,
                 agentTab.terminals
             ),
@@ -9810,6 +9828,8 @@ class EditorManager {
             this.renderAgentPanel(agentTab);
             return;
         }
+        const previousBusy = agentTab.busy;
+        const previousStatus = agentTab.status;
         try {
             agentTab.lastSubmittedPrompt = text;
             agentTab.busy = true;
@@ -9823,6 +9843,18 @@ class EditorManager {
             this.setAgentPromptValue('', agentTab);
             this.renderAgentPanel(agentTab);
         } catch (error) {
+            try {
+                await syncAgentsForServer(agentTab.server, { force: true });
+                if (!previousBusy && agentTab.busy) {
+                    agentTab.busy = false;
+                    agentTab.status = previousStatus || 'ready';
+                    agentTab.notifyUi();
+                }
+            } catch {
+                agentTab.busy = previousBusy;
+                agentTab.status = previousStatus || 'ready';
+                agentTab.notifyUi();
+            }
             alert(error.message, {
                 type: 'error',
                 title: 'Agent'
@@ -13003,6 +13035,22 @@ class AgentTab {
 
     #syncBusyWatchdog() {
         this.#clearBusyWatchdog();
+        if (!this.#needsBusyStateRefresh()) {
+            return;
+        }
+        this.busySyncTimer = setTimeout(() => {
+            this.busySyncTimer = null;
+            if (!this.#needsBusyStateRefresh()) {
+                return;
+            }
+            void syncAgentsForServer(this.server, { force: true })
+                .catch(() => {})
+                .finally(() => {
+                    if (this.#needsBusyStateRefresh()) {
+                        this.#syncBusyWatchdog();
+                    }
+                });
+        }, AGENT_BUSY_SYNC_DELAY_MS);
     }
 
     #normalizeTimelineEntry(entry, fallbackOrder = null) {
