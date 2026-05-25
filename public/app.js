@@ -13963,14 +13963,14 @@ function syncSessionTabMinimumHeight(tabElement) {
 
 function getAgentTabIndicatorState(agentTab) {
     if (!agentTab) return 'idle';
-    if (agentTab.busy) return 'running';
+    if (agentTabHasRunningActivity(agentTab)) return 'running';
     if (agentTab.needsAttention) return 'attention';
     return 'idle';
 }
 
 function getSessionAgentIndicatorState(session) {
     const tabs = getAgentTabsForSession(session);
-    if (tabs.some((tab) => tab.busy)) return 'running';
+    if (tabs.some((tab) => agentTabHasRunningActivity(tab))) return 'running';
     if (tabs.some((tab) => tab.needsAttention)) return 'attention';
     return 'idle';
 }
@@ -15513,8 +15513,14 @@ function buildAgentUsageCostRow(usage) {
 
 function getAgentRunningTerminalSummaries(agentTab) {
     return Array.from(agentTab?.terminals?.values?.() || []).filter(
-        (terminal) => terminal?.running
+        (terminal) => terminal?.running && !terminal?.released
     );
+}
+
+function agentTabHasRunningActivity(agentTab) {
+    if (!agentTab) return false;
+    if (agentTab.busy || agentTab.status === 'restoring') return true;
+    return false;
 }
 
 function getAgentTerminalStatusLabel(terminal = {}) {
@@ -15742,24 +15748,6 @@ function getAgentComposerFeedback(agentTab) {
         };
     }
 
-    const activeTool = getAgentOrderedMapValues(agentTab.toolCalls).find(
-        (toolCall) => {
-            const statusClass = getEffectiveAgentToolStatus(
-                toolCall,
-                agentTab
-            );
-            return statusClass === 'pending' || statusClass === 'running';
-        }
-    );
-    if (activeTool) {
-        return {
-            statusClass: 'running',
-            statusLabel: 'Running',
-            summary: `Working with ${getAgentToolTitle(activeTool)}.`,
-            hotkey: agentTab.busy ? 'Esc stops.' : ''
-        };
-    }
-
     if (agentTab.status === 'disconnected') {
         return {
             statusClass: 'error',
@@ -15779,6 +15767,23 @@ function getAgentComposerFeedback(agentTab) {
     }
 
     if (agentTab.busy) {
+        const activeTool = getAgentOrderedMapValues(agentTab.toolCalls).find(
+            (toolCall) => {
+                const statusClass = getEffectiveAgentToolStatus(
+                    toolCall,
+                    agentTab
+                );
+                return statusClass === 'pending' || statusClass === 'running';
+            }
+        );
+        if (activeTool) {
+            return {
+                statusClass: 'running',
+                statusLabel: 'Running',
+                summary: `Working with ${getAgentToolTitle(activeTool)}.`,
+                hotkey: 'Esc stops.'
+            };
+        }
         const hasAssistantMessage = (agentTab.messages || []).some((message) => (
             String(message?.role || '').toLowerCase() === 'assistant'
         ));
@@ -15871,32 +15876,6 @@ function getAgentActivityState(agentTab) {
         };
     }
 
-    const activeTool = getAgentOrderedMapValues(agentTab.toolCalls).find(
-        (toolCall) => {
-            const statusClass = getEffectiveAgentToolStatus(
-                toolCall,
-                agentTab
-            );
-            return statusClass === 'pending' || statusClass === 'running';
-        }
-    );
-    if (activeTool) {
-        const toolStatusClass = getEffectiveAgentToolStatus(
-            activeTool,
-            agentTab
-        );
-        const toolTitle = getAgentToolTitle(activeTool);
-        return {
-            stateClass: 'tool',
-            label: toolStatusClass === 'pending'
-                ? `Starting ${toolTitle}…${queuedSuffix}`
-                : `Running ${toolTitle}…${queuedSuffix}`,
-            iconSvg: SPINNER_ICON_SVG,
-            spinning: true,
-            cancelable: true
-        };
-    }
-
     if (agentTab.status === 'restoring') {
         return {
             stateClass: 'running',
@@ -15908,6 +15887,31 @@ function getAgentActivityState(agentTab) {
     }
 
     if (agentTab.busy) {
+        const activeTool = getAgentOrderedMapValues(agentTab.toolCalls).find(
+            (toolCall) => {
+                const statusClass = getEffectiveAgentToolStatus(
+                    toolCall,
+                    agentTab
+                );
+                return statusClass === 'pending' || statusClass === 'running';
+            }
+        );
+        if (activeTool) {
+            const toolStatusClass = getEffectiveAgentToolStatus(
+                activeTool,
+                agentTab
+            );
+            const toolTitle = getAgentToolTitle(activeTool);
+            return {
+                stateClass: 'tool',
+                label: toolStatusClass === 'pending'
+                    ? `Starting ${toolTitle}…${queuedSuffix}`
+                    : `Running ${toolTitle}…${queuedSuffix}`,
+                iconSvg: SPINNER_ICON_SVG,
+                spinning: true,
+                cancelable: true
+            };
+        }
         return {
             stateClass: 'running',
             label: `Thinking…${queuedSuffix}`,
@@ -16276,7 +16280,7 @@ function getAgentToolTerminalIds(toolCall) {
 function toolCallHasRunningTerminal(toolCall, terminals) {
     for (const terminalId of getAgentToolTerminalIds(toolCall)) {
         const terminal = resolveAgentTerminalSummary(terminals, terminalId);
-        if (terminal?.running) {
+        if (terminal?.running && !terminal?.released) {
             return true;
         }
     }
@@ -16285,13 +16289,16 @@ function toolCallHasRunningTerminal(toolCall, terminals) {
 
 function getEffectiveAgentToolStatus(toolCall, agentTab) {
     const statusClass = normalizeStatusClass(toolCall?.status);
+    if (
+        agentTab?.busy
+        && toolCallHasRunningTerminal(toolCall, agentTab.terminals)
+    ) {
+        return 'running';
+    }
     if (statusClass !== 'pending' && statusClass !== 'running') {
         return statusClass;
     }
     if (!agentTab) {
-        return statusClass;
-    }
-    if (toolCallHasRunningTerminal(toolCall, agentTab.terminals)) {
         return statusClass;
     }
     if (agentTab.status === 'error' || agentTab.errorMessage) {

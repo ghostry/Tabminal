@@ -295,12 +295,15 @@ class TabminalTestAgent {
             throw new Error('Session not found');
         }
 
-        session.controller?.abort();
-        session.controller = new AbortController();
-        const signal = session.controller.signal;
         const promptText = extractPromptText(params.prompt);
         const promptCommand = parsePromptCommand(promptText);
         const commandName = promptCommand?.name || '';
+        const shouldHang = commandName === 'hang-secondary';
+        if (!shouldHang) {
+            session.controller?.abort();
+        }
+        session.controller = new AbortController();
+        const signal = session.controller.signal;
         const modePrefix = session.modeId === 'review'
             ? '[review] '
             : '';
@@ -376,6 +379,10 @@ class TabminalTestAgent {
 
             if (commandName === 'fail' || /fail-prompt/i.test(promptText)) {
                 throw new Error('prompt dispatch failed');
+            }
+
+            if (shouldHang) {
+                await new Promise(() => {});
             }
 
             if (

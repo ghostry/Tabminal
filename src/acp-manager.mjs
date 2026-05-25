@@ -13,7 +13,6 @@ import * as persistence from './persistence.mjs';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
-const DEFAULT_PROMPT_IDLE_SETTLE_MS = 15 * 1000;
 const CLIENT_TIMELINE_INITIAL_LIMIT = 30;
 const COMPACT_TOOL_INPUT_STRING_LIMIT = 240;
 const COMPACT_TOOL_INPUT_ARRAY_LIMIT = 20;
@@ -2020,7 +2019,7 @@ function normalizePersistedTerminalSummary(summary = {}) {
             ? nextSummary.updatedAt
             : '',
         released: !!nextSummary.released,
-        running: !!nextSummary.running,
+        running: !!nextSummary.running && !nextSummary.released,
         exitStatus: nextSummary.exitStatus
             && typeof nextSummary.exitStatus === 'object'
             ? {
@@ -2336,7 +2335,7 @@ class ManagedTerminalSession extends EventEmitter {
                 ? this.terminalSession.updatedAt.toISOString()
                 : new Date(this.terminalSession.updatedAt || Date.now())
                     .toISOString(),
-            running: !this.terminalSession.exitStatus,
+            running: !this.released && !this.terminalSession.exitStatus,
             released: this.released
         };
     }
@@ -2376,10 +2375,6 @@ class AcpRuntime extends EventEmitter {
         this.env = options.env || process.env;
         this.terminalManager = options.terminalManager || null;
         this.idleTimeoutMs = options.idleTimeoutMs || DEFAULT_IDLE_TIMEOUT_MS;
-        this.promptIdleSettleMs = Math.max(
-            1000,
-            options.promptIdleSettleMs || DEFAULT_PROMPT_IDLE_SETTLE_MS
-        );
         this.connection = null;
         this.process = null;
         this.started = false;
@@ -2625,8 +2620,9 @@ class AcpRuntime extends EventEmitter {
             pendingUserEcho: null,
             pendingUserEchoes: [],
             activePromptCount: 0,
-            lastPromptActivityAt: 0,
-            promptIdleTimer: null,
+            activePromptIds: new Set(),
+            activePromptPrimaryId: '',
+            promptCounter: 0,
             restoreCapture: null,
             currentModeId,
             availableModes,
@@ -3026,6 +3022,9 @@ class AcpRuntime extends EventEmitter {
         tab.pendingUserEcho = null;
         tab.pendingUserEchoes = [];
         tab.activePromptCount = 0;
+        tab.activePromptIds = new Set();
+        tab.activePromptPrimaryId = '';
+        tab.promptCounter = 0;
         tab.plan = [];
         tab.usage = null;
         tab.terminals = new Map();
@@ -3052,6 +3051,9 @@ class AcpRuntime extends EventEmitter {
         tab.pendingUserEcho = null;
         tab.pendingUserEchoes = [];
         tab.activePromptCount = 0;
+        tab.activePromptIds = new Set();
+        tab.activePromptPrimaryId = '';
+        tab.promptCounter = 0;
         tab.restoreCapture = null;
         restorePersistedTabSnapshot(tab, snapshot);
     }
@@ -3329,133 +3331,57 @@ class AcpRuntime extends EventEmitter {
         ));
     }
 
-    #clearPromptIdleTimer(tab) {
-        if (tab?.promptIdleTimer) {
-            clearTimeout(tab.promptIdleTimer);
-            tab.promptIdleTimer = null;
+    #beginPromptRun(tab) {
+        if (!(tab.activePromptIds instanceof Set)) {
+            tab.activePromptIds = new Set();
         }
+        tab.promptCounter = Number.isFinite(tab.promptCounter)
+            ? tab.promptCounter + 1
+            : 1;
+        const promptId = String(tab.promptCounter);
+        const isPrimary = tab.activePromptIds.size === 0
+            || !tab.activePromptPrimaryId;
+        tab.activePromptIds.add(promptId);
+        tab.activePromptCount = tab.activePromptIds.size;
+        if (isPrimary) {
+            tab.activePromptPrimaryId = promptId;
+        }
+        return {
+            promptId,
+            isPrimary
+        };
     }
 
-    #hasPendingPermission(tab) {
-        return Array.from(tab?.permissions?.values?.() || []).some(
-            (permission) => permission.status === 'pending'
-        );
-    }
-
-    #hasActiveTool(tab) {
-        return Array.from(tab?.toolCalls?.values?.() || []).some(
-            (toolCall) => {
-                const statusClass = normalizeToolStatusClass(toolCall?.status);
-                return statusClass === 'pending' || statusClass === 'running';
-            }
-        );
-    }
-
-    #hasRunningTerminal(tab) {
-        return Array.from(tab?.terminals?.values?.() || []).some(
-            (terminal) => !!terminal?.running
-        );
-    }
-
-    #hasAssistantMessageAfterLatestUser(tab) {
-        const messages = Array.isArray(tab?.messages) ? tab.messages : [];
-        let latestUserOrder = -Infinity;
-        let latestAssistantOrder = -Infinity;
-        for (const message of messages) {
-            const order = Number.isFinite(message?.order) ? message.order : 0;
-            const role = String(message?.role || '').toLowerCase();
-            const kind = String(message?.kind || 'message').toLowerCase();
-            if (kind !== 'message') continue;
-            if (role === 'user') {
-                latestUserOrder = Math.max(latestUserOrder, order);
-            } else if (
-                role === 'assistant'
-                && String(message?.text || '').trim()
-            ) {
-                latestAssistantOrder = Math.max(latestAssistantOrder, order);
-            }
+    #finishPromptRun(tab, promptId, options = {}) {
+        if (!(tab.activePromptIds instanceof Set)) {
+            tab.activePromptIds = new Set();
         }
-        return latestAssistantOrder > latestUserOrder;
-    }
+        const wasTracked = tab.activePromptIds.delete(promptId);
+        const isPrimary = tab.activePromptPrimaryId === promptId;
+        if (!wasTracked && !isPrimary) {
+            tab.activePromptCount = tab.activePromptIds.size;
+            return {
+                ignored: true,
+                primary: false
+            };
+        }
+        if (!isPrimary && tab.activePromptPrimaryId) {
+            tab.activePromptCount = tab.activePromptIds.size;
+            return {
+                ignored: true,
+                primary: false
+            };
+        }
 
-    #touchPromptActivity(tab) {
-        if (!tab) return;
-        tab.lastPromptActivityAt = Date.now();
-        this.#syncPromptIdleSettlement(tab);
-    }
-
-    #canSettlePromptIdle(tab) {
-        if (!tab || !tab.busy || (tab.activePromptCount || 0) <= 0) {
-            return false;
-        }
-        if (tab.status === 'restoring' || tab.errorMessage) {
-            return false;
-        }
-        if (
-            this.#hasPendingPermission(tab)
-            || this.#hasActiveTool(tab)
-            || this.#hasRunningTerminal(tab)
-        ) {
-            return false;
-        }
-        if (!this.#hasAssistantMessageAfterLatestUser(tab)) {
-            return false;
-        }
-        const lastActivity = Number.isFinite(tab.lastPromptActivityAt)
-            ? tab.lastPromptActivityAt
-            : 0;
-        return Date.now() - lastActivity >= this.promptIdleSettleMs;
-    }
-
-    #settleIdlePrompts(tab) {
-        this.#clearPromptIdleTimer(tab);
-        if (!this.#canSettlePromptIdle(tab)) {
-            this.#syncPromptIdleSettlement(tab);
-            return;
-        }
+        tab.activePromptIds.clear();
         tab.activePromptCount = 0;
+        tab.activePromptPrimaryId = '';
         tab.busy = false;
-        tab.status = 'ready';
-        tab.syntheticStreams.clear();
-        tab.pendingUserEchoes = [];
-        tab.pendingUserEcho = null;
-        this.#settleStaleToolCalls(tab, 'completed');
-        this.#broadcast(tab, {
-            type: 'complete',
-            stopReason: 'idle',
-            status: tab.status,
-            busy: tab.busy
-        });
-        this.#markTabDirty(tab);
-    }
-
-    #syncPromptIdleSettlement(tab) {
-        this.#clearPromptIdleTimer(tab);
-        if (!tab || !tab.busy || (tab.activePromptCount || 0) <= 0) {
-            return;
-        }
-        if (
-            tab.status === 'restoring'
-            || tab.errorMessage
-            || this.#hasPendingPermission(tab)
-            || this.#hasActiveTool(tab)
-            || this.#hasRunningTerminal(tab)
-            || !this.#hasAssistantMessageAfterLatestUser(tab)
-        ) {
-            return;
-        }
-        const lastActivity = Number.isFinite(tab.lastPromptActivityAt)
-            ? tab.lastPromptActivityAt
-            : Date.now();
-        const delay = Math.max(
-            0,
-            this.promptIdleSettleMs - (Date.now() - lastActivity)
-        );
-        tab.promptIdleTimer = setTimeout(() => {
-            tab.promptIdleTimer = null;
-            this.#settleIdlePrompts(tab);
-        }, delay);
-        tab.promptIdleTimer.unref?.();
+        tab.status = options.status || 'ready';
+        return {
+            ignored: false,
+            primary: true
+        };
     }
 
     attachSocket(tabId, socket, options = {}) {
@@ -3490,8 +3416,7 @@ class AcpRuntime extends EventEmitter {
             promptText,
             promptAttachments
         );
-        tab.activePromptCount = Math.max(0, tab.activePromptCount || 0) + 1;
-        tab.lastPromptActivityAt = Date.now();
+        const { promptId } = this.#beginPromptRun(tab);
         tab.errorMessage = '';
         tab.busy = true;
         tab.status = 'running';
@@ -3530,37 +3455,39 @@ class AcpRuntime extends EventEmitter {
                 prompt: promptBlocks
             });
         } catch (error) {
-            tab.activePromptCount = Math.max(0, (tab.activePromptCount || 1) - 1);
-            tab.busy = tab.activePromptCount > 0;
-            tab.status = tab.busy ? 'running' : 'error';
-            this.#syncPromptIdleSettlement(tab);
-            this.#settleStaleToolCalls(tab, 'error');
-            tab.errorMessage = formatAgentStartupError(
-                tab.definition,
-                error
-            );
-            if (!tab.busy) {
-                this.#clearPromptIdleTimer(tab);
-                tab.pendingUserEchoes = [];
-                tab.pendingUserEcho = null;
-            } else {
-                this.#syncPromptIdleSettlement(tab);
-            }
-            this.#broadcast(tab, {
-                type: 'status',
-                status: tab.status,
-                busy: tab.busy,
-                errorMessage: tab.errorMessage
+            const finish = this.#finishPromptRun(tab, promptId, {
+                status: 'error'
             });
+            if (!finish.ignored) {
+                this.#settleStaleToolCalls(tab, 'error');
+                tab.errorMessage = formatAgentStartupError(
+                    tab.definition,
+                    error
+                );
+                if (!tab.busy) {
+                    tab.pendingUserEchoes = [];
+                    tab.pendingUserEcho = null;
+                }
+                this.#broadcast(tab, {
+                    type: 'status',
+                    status: tab.status,
+                    busy: tab.busy,
+                    errorMessage: tab.errorMessage
+                });
+            }
             this.#markTabDirty(tab);
             throw error;
         }
 
         void promptPromise.then(async (response) => {
             if (!this.tabs.has(tabId)) return;
-            tab.activePromptCount = Math.max(0, (tab.activePromptCount || 1) - 1);
-            tab.busy = tab.activePromptCount > 0;
-            tab.status = tab.busy ? 'running' : 'ready';
+            const finish = this.#finishPromptRun(tab, promptId, {
+                status: 'ready'
+            });
+            if (finish.ignored) {
+                this.#markTabDirty(tab);
+                return;
+            }
             this.#settleStaleToolCalls(
                 tab,
                 response?.stopReason === 'cancelled'
@@ -3576,28 +3503,29 @@ class AcpRuntime extends EventEmitter {
                     usage: serializeUsageState(tab.usage)
                 });
             }
-            tab.syntheticStreams.clear();
-            if (!tab.busy) {
-                this.#clearPromptIdleTimer(tab);
-                tab.pendingUserEchoes = [];
-                tab.pendingUserEcho = null;
-            } else {
-                this.#syncPromptIdleSettlement(tab);
-            }
             const hydratedChanges = await this.#hydrateFreshSessionMetadata(tab);
             this.#broadcastHydratedSessionMetadata(tab, hydratedChanges);
+            tab.syntheticStreams.clear();
+            if (!tab.busy) {
+                tab.pendingUserEchoes = [];
+                tab.pendingUserEcho = null;
+            }
             this.#broadcast(tab, {
                 type: 'complete',
-                stopReason: response.stopReason,
+                stopReason: response?.stopReason,
                 status: tab.status,
                 busy: tab.busy
             });
             this.#markTabDirty(tab);
         }).catch((error) => {
             if (!this.tabs.has(tabId)) return;
-            tab.activePromptCount = Math.max(0, (tab.activePromptCount || 1) - 1);
-            tab.busy = tab.activePromptCount > 0;
-            tab.status = tab.busy ? 'running' : 'error';
+            const finish = this.#finishPromptRun(tab, promptId, {
+                status: 'error'
+            });
+            if (finish.ignored) {
+                this.#markTabDirty(tab);
+                return;
+            }
             this.#settleStaleToolCalls(tab, 'error');
             tab.errorMessage = formatAgentStartupError(
                 tab.definition,
@@ -3605,7 +3533,6 @@ class AcpRuntime extends EventEmitter {
             );
             tab.syntheticStreams.clear();
             if (!tab.busy) {
-                this.#clearPromptIdleTimer(tab);
                 tab.pendingUserEchoes = [];
                 tab.pendingUserEcho = null;
             }
@@ -3787,7 +3714,6 @@ class AcpRuntime extends EventEmitter {
     async closeTab(tabId) {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
-        this.#clearPromptIdleTimer(tab);
 
         if (tab.busy) {
             try {
@@ -3967,10 +3893,7 @@ class AcpRuntime extends EventEmitter {
             });
         }
         if (didChange) {
-            this.#touchPromptActivity(tab);
             this.#markTabDirty(tab);
-        } else {
-            this.#syncPromptIdleSettlement(tab);
         }
     }
 
@@ -4379,8 +4302,6 @@ class AcpRuntime extends EventEmitter {
                 tab,
                 tab.status === 'error' ? 'error' : 'completed'
             );
-        } else {
-            this.#touchPromptActivity(tab);
         }
         const terminalUpdate = compactTerminalSummary(nextSummary);
         this.#broadcast(tab, {

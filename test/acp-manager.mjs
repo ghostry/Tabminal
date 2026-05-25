@@ -2327,6 +2327,59 @@ describe('AcpManager', () => {
         }
     });
 
+    it('uses the first concurrent prompt to settle tab busy state', async () => {
+        const manager = new AcpManager({
+            loadTabs: async () => [],
+            saveTabs: async () => {}
+        });
+        const agentPath = fileURLToPath(
+            new URL('../src/acp-test-agent.mjs', import.meta.url)
+        );
+        manager.definitions = [{
+            id: 'test-agent',
+            label: 'ACP Test Agent',
+            description: 'Local ACP smoke-test agent',
+            command: process.execPath,
+            args: [agentPath],
+            commandLabel: `${process.execPath} ${agentPath}`
+        }];
+
+        try {
+            const tab = await manager.createTab({
+                agentId: 'test-agent',
+                cwd: process.cwd(),
+                terminalSessionId: 'term-1'
+            });
+            const { events, socket } = createSocketRecorder();
+            manager.attachSocket(tab.id, socket);
+
+            await manager.sendPrompt(tab.id, '/plan');
+            await manager.sendPrompt(tab.id, '/hang-secondary');
+
+            const completedEvent = await waitForValue(
+                () => events.find((event) => (
+                    event.type === 'complete'
+                    && event.status === 'ready'
+                    && event.busy === false
+                )),
+                12000
+            );
+            assert.equal(completedEvent.status, 'ready');
+            assert.equal(completedEvent.busy, false);
+
+            const settledTab = await waitForValue(async () => {
+                const state = await manager.listState();
+                const current = state.tabs.find((entry) => entry.id === tab.id);
+                return current && current.status === 'ready' && !current.busy
+                    ? current
+                    : null;
+            }, 12000);
+            assert.equal(settledTab.busy, false);
+        } finally {
+            await manager.dispose();
+        }
+    });
+
     it('cancels real ACP test-agent prompt turns cleanly', async () => {
         const manager = new AcpManager({
             loadTabs: async () => [],
