@@ -2,7 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 
-const { TerminalManager } = await import('../src/terminal-manager.mjs');
+const {
+    TerminalManager,
+    ensureTerminalUtf8Locale
+} = await import('../src/terminal-manager.mjs');
 
 function createWorkspaceState(overrides = {}) {
     return {
@@ -20,6 +23,28 @@ function createWorkspaceState(overrides = {}) {
 }
 
 describe('TerminalManager workspace sync', () => {
+    it('normalizes terminal locale to UTF-8 for prompt rendering', () => {
+        const env = {
+            LANG: 'C',
+            LC_ALL: 'C'
+        };
+
+        ensureTerminalUtf8Locale(env);
+
+        assert.match(env.LC_ALL, /utf-?8/i);
+    });
+
+    it('preserves existing UTF-8 locale settings', () => {
+        const env = {
+            LANG: 'zh_CN.UTF-8'
+        };
+
+        ensureTerminalUtf8Locale(env);
+
+        assert.equal(env.LANG, 'zh_CN.UTF-8');
+        assert.equal(env.LC_CTYPE, 'zh_CN.UTF-8');
+    });
+
     it('only accepts newer workspace snapshots', () => {
         const manager = new TerminalManager();
         const session = {

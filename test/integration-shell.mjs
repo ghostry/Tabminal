@@ -203,6 +203,59 @@ test("temporary HOME does not inherit host prompt command", async () => {
     }
 });
 
+test("prompt renders unicode cwd under non-UTF-8 inherited locale", async () => {
+    const root = await fs.mkdtemp(
+        path.join(os.tmpdir(), "tabminal-unicode-cwd-")
+    );
+    const cwd = path.join(root, "金融管理");
+    const home = await fs.mkdtemp(
+        path.join(os.tmpdir(), "tabminal-shell-home-")
+    );
+    await fs.mkdir(cwd);
+    await fs.writeFile(
+        path.join(home, ".bashrc"),
+        "PS1='\\u@\\h:\\w$ '\n"
+    );
+
+    const manager = new TerminalManager();
+    let session = null;
+
+    try {
+        session = manager._createPtySession({
+            cwd,
+            env: {
+                HOME: home,
+                LANG: "C",
+                LC_ALL: "C"
+            },
+            persistent: false
+        });
+        const deadline = Date.now() + 8000;
+        while (
+            !session.history.includes("金融管理")
+            && Date.now() < deadline
+        ) {
+            await delay(200);
+        }
+
+        assert.ok(
+            session.history.includes("金融管理"),
+            "prompt should contain the unicode cwd"
+        );
+        assert.ok(
+            !/M-/.test(session.history),
+            "prompt should not contain readline meta-byte mojibake"
+        );
+    } finally {
+        if (session) {
+            await manager.removeSession(session.id);
+        }
+        manager.dispose();
+        await fs.rm(root, { recursive: true, force: true });
+        await fs.rm(home, { recursive: true, force: true });
+    }
+});
+
 test("managed sessions stay attachable until explicitly removed", async () => {
     const manager = new TerminalManager();
     const cwd = process.cwd();

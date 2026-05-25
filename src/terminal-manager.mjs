@@ -38,6 +38,44 @@ const initialRows = Number.parseInt(
     10
 ) || 30;
 
+function isUtf8Locale(value) {
+    return /utf-?8/i.test(String(value || ''));
+}
+
+function getDefaultUtf8Locale() {
+    if (process.platform === 'darwin') {
+        return 'en_US.UTF-8';
+    }
+    return 'C.UTF-8';
+}
+
+export function ensureTerminalUtf8Locale(env) {
+    if (!env || typeof env !== 'object') return env;
+
+    if (isUtf8Locale(env.LC_ALL)) {
+        return env;
+    }
+
+    const utf8Locale = isUtf8Locale(env.LC_CTYPE)
+        ? env.LC_CTYPE
+        : (
+            isUtf8Locale(env.LANG)
+                ? env.LANG
+                : getDefaultUtf8Locale()
+        );
+
+    if (env.LC_ALL) {
+        env.LC_ALL = utf8Locale;
+        return env;
+    }
+
+    env.LC_CTYPE = utf8Locale;
+    if (!env.LANG || env.LANG === 'C' || env.LANG === 'POSIX') {
+        env.LANG = utf8Locale;
+    }
+    return env;
+}
+
 function buildBashBootstrap({
     env,
     shell,
@@ -258,6 +296,7 @@ export class TerminalManager extends EventEmitter {
             ...process.env,
             ...(options.env || {})
         };
+        ensureTerminalUtf8Locale(env);
         let spawnShell = options.spawnCommand || shell;
         let args = Array.isArray(options.spawnArgs) ? options.spawnArgs : [];
         let initDirPath = null;

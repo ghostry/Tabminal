@@ -2309,10 +2309,15 @@ class EditorManager {
         }
 
         if (file.model) {
+            const alreadyShowingSameEditorModel = (
+                this.editor.getModel?.() === file.model
+                && this.getActiveWorkspaceTabKey(session)
+                    === makeFileWorkspaceTabKey(filePath)
+            );
             this.editor.setModel(file.model);
             this.editor.updateOptions({ readOnly: !!file.readonly });
             const savedViewState = session.editorState.viewStates.get(filePath);
-            if (savedViewState) {
+            if (savedViewState && !alreadyShowingSameEditorModel) {
                 this.editor.restoreViewState(savedViewState);
             }
         }
@@ -7452,13 +7457,15 @@ class EditorManager {
             const span = document.createElement('span');
             span.textContent = name;
             
-            const closeBtn = document.createElement('span');
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
             closeBtn.className = 'close-btn';
             closeBtn.innerHTML = CLOSE_ICON_SVG;
-            closeBtn.onclick = (e) => {
-                e.stopPropagation();
+            closeBtn.title = 'Close';
+            closeBtn.setAttribute('aria-label', `Close ${name}`);
+            bindTabChildAction(closeBtn, () => {
                 this.closeFile(path);
-            };
+            });
             let unsplitBtn = null;
 
             if (splitEnabled) {
@@ -7572,13 +7579,18 @@ class EditorManager {
                 getAgentDisplayLabel(agentTab)
             );
 
-            const closeBtn = document.createElement('span');
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
             closeBtn.className = 'close-btn';
             closeBtn.innerHTML = CLOSE_ICON_SVG;
-            closeBtn.onclick = (e) => {
-                e.stopPropagation();
+            closeBtn.title = 'Close';
+            closeBtn.setAttribute(
+                'aria-label',
+                `Close ${getAgentDisplayLabel(agentTab) || 'agent tab'}`
+            );
+            bindTabChildAction(closeBtn, () => {
                 void this.closeAgentTab(agentTab.key);
-            };
+            });
 
             tab.onclick = () => this.activateAgentTab(agentTab.key);
             bindSingleTapActivation(tab, () => this.activateAgentTab(
@@ -7857,13 +7869,18 @@ class EditorManager {
         if (!filePath) return;
         const focusEditor = options.focusEditor !== false;
         const state = this.currentSession.editorState;
+        const previousActiveWorkspaceTabKey = this.getActiveWorkspaceTabKey(
+            this.currentSession
+        );
+        const previousActiveFilePath = state.activeFilePath;
+        const previousEditorModel = this.editor?.getModel?.() || null;
         const defaultedTerminalTab = !isRestore
             && this.defaultTerminalToWorkspaceTab(this.currentSession);
 
-        if (!isRestore && state.activeFilePath && state.activeFilePath !== filePath) {
-            const currentGlobal = this.getModel(state.activeFilePath);
+        if (!isRestore && previousActiveFilePath && previousActiveFilePath !== filePath) {
+            const currentGlobal = this.getModel(previousActiveFilePath);
             if (currentGlobal && currentGlobal.type === 'text' && this.editor) {
-                state.viewStates.set(state.activeFilePath, this.editor.saveViewState());
+                state.viewStates.set(previousActiveFilePath, this.editor.saveViewState());
             }
         }
 
@@ -7944,10 +7961,16 @@ class EditorManager {
                 );
             }
             if (this.editor && file.model) {
+                const alreadyShowingSameEditorModel = (
+                    previousActiveWorkspaceTabKey
+                        === makeFileWorkspaceTabKey(filePath)
+                    && previousActiveFilePath === filePath
+                    && previousEditorModel === file.model
+                );
                 this.editor.setModel(file.model);
                 this.editor.updateOptions({ readOnly: !!file.readonly });
                 const savedViewState = state.viewStates.get(filePath);
-                if (savedViewState) {
+                if (savedViewState && !alreadyShowingSameEditorModel) {
                     this.editor.restoreViewState(savedViewState);
                 }
                 if (focusEditor) {
@@ -7969,11 +7992,17 @@ class EditorManager {
             }
 
             if (this.editor && file.model) {
+                const alreadyShowingSameEditorModel = (
+                    previousActiveWorkspaceTabKey
+                        === makeFileWorkspaceTabKey(filePath)
+                    && previousActiveFilePath === filePath
+                    && previousEditorModel === file.model
+                );
                 this.editor.setModel(file.model);
                 this.editor.updateOptions({ readOnly: !!file.readonly });
                 
                 const savedViewState = state.viewStates.get(filePath);
-                if (savedViewState) {
+                if (savedViewState && !alreadyShowingSameEditorModel) {
                     this.editor.restoreViewState(savedViewState);
                 }
                 if (focusEditor) {
@@ -14180,6 +14209,27 @@ function bindSingleTapActivation(element, onActivate, options = {}) {
     });
 }
 
+function bindTabChildAction(element, onClick) {
+    if (!element || typeof onClick !== 'function') {
+        return;
+    }
+    const stopParentActivation = (event) => {
+        event.stopPropagation();
+    };
+    element.addEventListener('pointerdown', stopParentActivation);
+    element.addEventListener('mousedown', stopParentActivation);
+    element.addEventListener('touchstart', stopParentActivation, {
+        passive: true
+    });
+    element.addEventListener('touchend', stopParentActivation);
+    element.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        onClick(event);
+    });
+}
+
 function isIgnoredTerminalExecutionCommand(command) {
     return !!(
         command
@@ -18440,10 +18490,9 @@ function createTabElement(session) {
     closeBtn.className = 'close-tab-button';
     closeBtn.innerHTML = CLOSE_ICON_SVG;
     closeBtn.title = 'Close Terminal';
-    closeBtn.onclick = (e) => {
-        e.stopPropagation();
+    bindTabChildAction(closeBtn, () => {
         closeSession(session.key);
-    };
+    });
     tab.appendChild(closeBtn);
 
     const toggleEditorBtn = document.createElement('button');

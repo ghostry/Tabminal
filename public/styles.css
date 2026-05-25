@@ -2100,6 +2100,12 @@ kbd {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex: 0 0 16px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
 }
 
 .editor-tab:hover .close-btn,
