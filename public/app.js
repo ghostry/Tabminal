@@ -14478,7 +14478,7 @@ function getAgentTimelineItems(agentTab) {
         });
     }
 
-    for (const toolCall of agentTab.toolCalls?.values?.() || []) {
+    for (const toolCall of getAgentDisplayToolCalls(agentTab)) {
         items.push({
             type: 'tool',
             order: Number.isFinite(toolCall?.order) ? toolCall.order : 0,
@@ -14516,6 +14516,78 @@ function getAgentTimelineItems(agentTab) {
     });
 
     return items;
+}
+
+function getAgentDisplayToolCalls(agentTab) {
+    const tools = Array.from(agentTab?.toolCalls?.values?.() || []);
+    const visible = [];
+    const sessionParents = new Map();
+    for (const toolCall of tools) {
+        if (isAgentPollOutputTool(toolCall)) {
+            const sessionId = getAgentToolSessionId(toolCall);
+            const parent = sessionId ? sessionParents.get(sessionId) : null;
+            const output = getAgentToolCompactOutput(toolCall);
+            if (parent) {
+                if (output) {
+                    if (!Array.isArray(parent.__agentMergedOutputs)) {
+                        parent.__agentMergedOutputs = [];
+                    }
+                    parent.__agentMergedOutputs.push(output);
+                }
+                continue;
+            }
+        }
+        const copy = toolCall && typeof toolCall === 'object'
+            ? { ...toolCall }
+            : toolCall;
+        visible.push(copy);
+        const sessionId = getAgentToolSessionId(copy);
+        if (sessionId && !isAgentPollOutputTool(copy)) {
+            sessionParents.set(sessionId, copy);
+        }
+    }
+    for (const toolCall of visible) {
+        if (Array.isArray(toolCall?.__agentMergedOutputs)) {
+            toolCall.rawOutput = {
+                stdout: toolCall.__agentMergedOutputs.join('\n\n')
+            };
+            toolCall.detailsAvailable = false;
+            toolCall.detailsLoaded = true;
+            delete toolCall.__agentMergedOutputs;
+        }
+    }
+    return visible;
+}
+
+function isAgentPollOutputTool(toolCall) {
+    const title = String(toolCall?.title || '').trim();
+    return /^write_stdin$/i.test(title)
+        && !String(toolCall?.rawInput?.chars || '').trim()
+        && !!getAgentToolSessionId(toolCall);
+}
+
+function getAgentToolSessionId(toolCall) {
+    const explicit = String(toolCall?.toolSessionId || '').trim();
+    if (explicit) return explicit;
+    const rawInputSessionId = toolCall?.rawInput?.session_id;
+    if (
+        typeof rawInputSessionId === 'string'
+        || Number.isFinite(rawInputSessionId)
+    ) {
+        return String(rawInputSessionId);
+    }
+    const rawOutput = typeof toolCall?.rawOutput === 'string'
+        ? toolCall.rawOutput
+        : '';
+    const match = rawOutput.match(/session ID\s+([A-Za-z0-9_-]+)/i);
+    return match?.[1] || '';
+}
+
+function getAgentToolCompactOutput(toolCall) {
+    if (typeof toolCall?.compactOutput === 'string') {
+        return toolCall.compactOutput;
+    }
+    return summarizeAgentRawOutput(toolCall?.rawOutput);
 }
 
 function getAgentTimelineItemKey(entry, absoluteIndex = 0) {
@@ -15698,14 +15770,14 @@ function buildAgentPathLinks(agentTab, toolLike) {
 function buildAgentToolSummary(toolCall, terminals = null) {
     const editDiffLine = buildEditToolCollapsedDiffLine(toolCall);
     if (editDiffLine) return compactAgentSummaryText(editDiffLine);
-    const terminalSummary = compactAgentSummaryText(
-        summarizeAgentTerminalCommands(toolCall, terminals)
-    );
-    if (terminalSummary) return terminalSummary;
     const inputSummary = compactAgentSummaryText(
         summarizeAgentRawInput(toolCall?.rawInput)
     );
     if (inputSummary) return inputSummary;
+    const terminalSummary = compactAgentSummaryText(
+        summarizeAgentTerminalCommands(toolCall, terminals)
+    );
+    if (terminalSummary) return terminalSummary;
     const title = compactAgentSummaryText(getAgentToolTitle(toolCall));
     if (title) return title;
     return '';
@@ -15716,11 +15788,16 @@ function summarizeAgentTerminalCommands(toolCall, terminals = null) {
     for (const terminalId of getAgentToolTerminalIds(toolCall)) {
         const terminal = resolveAgentTerminalSummary(terminals, terminalId);
         const command = String(terminal?.command || '').trim();
-        if (command) {
+        if (command && !isGenericAgentToolLabel(command)) {
             commands.push(command);
         }
     }
     return Array.from(new Set(commands)).join('\n');
+}
+
+function isGenericAgentToolLabel(label) {
+    return /^(exec_command|write_stdin|read|edit|search|fetch|execute)$/i
+        .test(String(label || '').trim());
 }
 
 function isCompactedRawInputPlaceholder(rawInput) {
@@ -15755,7 +15832,21 @@ function summarizeAgentRawInput(rawInput) {
     if (Array.isArray(rawInput.paths) && rawInput.paths.length > 0) {
         return rawInput.paths.join('\n');
     }
+    if (typeof rawInput.chars === 'string' && rawInput.chars) {
+        return summarizeAgentInputChars(rawInput.chars);
+    }
     return JSON.stringify(rawInput, null, 2);
+}
+
+function summarizeAgentInputChars(chars) {
+    const value = String(chars || '');
+    if (value === '\u0003') return 'Sent Ctrl+C';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    if (/^[\x20-\x7E\s]+$/.test(trimmed)) {
+        return trimmed;
+    }
+    return 'Sent terminal input';
 }
 
 function extractCommandExecutable(command) {
@@ -16190,11 +16281,12 @@ function getAgentToolTitle(toolCall) {
     const genericTitle = String(toolCall?.title || '').trim();
     if (
         genericTitle
-        && !/^(exec_command|read|edit|search|fetch|execute)$/i.test(
-            genericTitle
-        )
+        && !isGenericAgentToolLabel(genericTitle)
     ) {
         return genericTitle;
+    }
+    if (/^write_stdin$/i.test(genericTitle)) {
+        return 'Terminal output';
     }
     if (toolCall?.kind === 'read') {
         return firstPathBase ? `Read ${firstPathBase}` : 'Read file';

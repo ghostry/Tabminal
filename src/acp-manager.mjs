@@ -16,6 +16,7 @@ const DEFAULT_TERMINAL_OUTPUT_LIMIT = 256 * 1024;
 const CLIENT_TIMELINE_INITIAL_LIMIT = 30;
 const COMPACT_TOOL_INPUT_STRING_LIMIT = 240;
 const COMPACT_TOOL_INPUT_ARRAY_LIMIT = 20;
+const COMPACT_TOOL_OUTPUT_STRING_LIMIT = 8 * 1024;
 
 function compactString(value, limit = COMPACT_TOOL_INPUT_STRING_LIMIT) {
     const text = typeof value === 'string' ? value : '';
@@ -86,6 +87,12 @@ function compactRawInput(rawInput = null) {
     if (Array.isArray(rawInput.paths)) {
         next.paths = compactStringArray(rawInput.paths);
     }
+    if (
+        typeof rawInput.session_id === 'string'
+        || Number.isFinite(rawInput.session_id)
+    ) {
+        next.session_id = rawInput.session_id;
+    }
     if (typeof rawInput.cmd === 'string' && rawInput.cmd) {
         next.cmd = compactString(rawInput.cmd);
     }
@@ -93,6 +100,9 @@ function compactRawInput(rawInput = null) {
         next.command = compactString(rawInput.command);
     } else if (Array.isArray(rawInput.command)) {
         next.command = compactStringArray(rawInput.command);
+    }
+    if (typeof rawInput.chars === 'string' && rawInput.chars) {
+        next.chars = compactString(rawInput.chars);
     }
     if (rawInput.changes && typeof rawInput.changes === 'object') {
         next.changes = Object.fromEntries(
@@ -115,9 +125,40 @@ function compactRawInput(rawInput = null) {
     };
 }
 
+function extractToolSessionId(toolCall = {}) {
+    const rawInputSessionId = toolCall?.rawInput?.session_id;
+    if (typeof rawInputSessionId === 'string' || Number.isFinite(rawInputSessionId)) {
+        return String(rawInputSessionId);
+    }
+    const rawOutput = typeof toolCall?.rawOutput === 'string'
+        ? toolCall.rawOutput
+        : '';
+    const match = rawOutput.match(/session ID\s+([A-Za-z0-9_-]+)/i);
+    return match?.[1] || '';
+}
+
+function summarizeCompactRawOutput(rawOutput) {
+    if (typeof rawOutput !== 'string' || !rawOutput) return '';
+    const outputMatch = rawOutput.match(/Output:\n([\s\S]*)$/);
+    const text = outputMatch?.[1] || rawOutput;
+    return compactString(text, COMPACT_TOOL_OUTPUT_STRING_LIMIT);
+}
+
 function compactToolCall(toolCall = {}) {
     const next = cloneSerializable(toolCall, {}) || {};
+    const toolSessionId = extractToolSessionId(next);
+    const compactOutput = summarizeCompactRawOutput(next.rawOutput);
     delete next.rawOutput;
+    if (toolSessionId) {
+        next.toolSessionId = toolSessionId;
+    }
+    if (
+        compactOutput
+        && String(next.title || '').trim() === 'write_stdin'
+        && !String(next.rawInput?.chars || '')
+    ) {
+        next.compactOutput = compactOutput;
+    }
     if (next.rawInput) {
         next.rawInput = compactRawInput(next.rawInput);
     }
