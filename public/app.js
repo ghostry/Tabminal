@@ -3359,6 +3359,26 @@ class EditorManager {
         return await response.json();
     }
 
+    async fetchTextFileInfoResult(session, filePath) {
+        if (!session || !filePath) {
+            return { ok: false, status: 400, data: null };
+        }
+        const response = await session.server.fetch(
+            `/api/fs/info?path=${encodeURIComponent(filePath)}`
+        );
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            data = null;
+        }
+        return {
+            ok: response.ok,
+            status: response.status,
+            data
+        };
+    }
+
     applyTextFileSnapshot(session, filePath, snapshot, options = {}) {
         const entry = this.getTextFileEntry(filePath, session);
         if (!entry || !snapshot || typeof snapshot !== 'object') {
@@ -3627,11 +3647,43 @@ class EditorManager {
         const filePath = session?.editorState?.activeFilePath || '';
         const next = new Set();
         const entry = this.getTextFileEntry(filePath, session);
-        if (this.isActiveTextFile(session, filePath) && entry && !entry.readonly) {
+        if (this.isActiveTextFile(session, filePath) && entry) {
             const key = `${session.server.id}:${filePath}`;
-            next.add(key);
-            if (!this.watchedFileVersionPaths.has(key)) {
-                session.server.hostSocket?.watchFileVersion(filePath);
+            if (!entry.readonly) {
+                next.add(key);
+                if (!this.watchedFileVersionPaths.has(key)) {
+                    session.server.hostSocket?.watchFileVersion(filePath);
+                }
+            }
+
+            const info = await this.fetchTextFileInfoResult(
+                session,
+                filePath
+            );
+            if (info.ok) {
+                await this.handleWatchedFileVersionChanged(
+                    session.server,
+                    {
+                        type: 'file.version.changed',
+                        path: filePath,
+                        version: typeof info.data?.version === 'string'
+                            ? info.data.version
+                            : '',
+                        readonly: !!info.data?.readonly,
+                        deleted: false
+                    }
+                );
+            } else if (info.status === 404) {
+                await this.handleWatchedFileVersionChanged(
+                    session.server,
+                    {
+                        type: 'file.version.changed',
+                        path: filePath,
+                        version: '',
+                        readonly: false,
+                        deleted: true
+                    }
+                );
             }
         }
         for (const key of this.watchedFileVersionPaths) {
@@ -7694,6 +7746,7 @@ class EditorManager {
                 show: true
             });
         }
+        void this.checkActiveFileVersion();
     }
 
     activateFileTab(filePath, isRestore = false, options = {}) {
@@ -7772,6 +7825,7 @@ class EditorManager {
                     filePath,
                     this.currentSession
                 );
+                void this.checkActiveFileVersion();
                 return;
             }
             this.agentContainer.style.display = 'none';
@@ -7799,6 +7853,7 @@ class EditorManager {
                 requestAnimationFrame(() => this.editor.layout());
             }
             this.scheduleMarkdownPreviewRender(filePath, this.currentSession);
+            void this.checkActiveFileVersion();
         } else {
             this.agentContainer.style.display = 'none';
             this.imagePreviewContainer.style.display = 'none';
