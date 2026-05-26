@@ -3430,39 +3430,6 @@ class EditorManager {
         return await response.json();
     }
 
-    async readTextFileInfo(session, filePath) {
-        if (!session || !filePath) {
-            throw new Error('File path required');
-        }
-        const response = await session.server.fetch(
-            `/api/fs/info?path=${encodeURIComponent(filePath)}`
-        );
-        if (!response.ok) {
-            await throwResponseError(response, 'Failed to inspect file');
-        }
-        return await response.json();
-    }
-
-    async fetchTextFileInfoResult(session, filePath) {
-        if (!session || !filePath) {
-            return { ok: false, status: 400, data: null };
-        }
-        const response = await session.server.fetch(
-            `/api/fs/info?path=${encodeURIComponent(filePath)}`
-        );
-        let data = null;
-        try {
-            data = await response.json();
-        } catch {
-            data = null;
-        }
-        return {
-            ok: response.ok,
-            status: response.status,
-            data
-        };
-    }
-
     applyTextFileSnapshot(session, filePath, snapshot, options = {}) {
         const entry = this.getTextFileEntry(filePath, session);
         if (!entry || !snapshot || typeof snapshot !== 'object') {
@@ -3733,41 +3700,9 @@ class EditorManager {
         const entry = this.getTextFileEntry(filePath, session);
         if (this.isActiveTextFile(session, filePath) && entry) {
             const key = `${session.server.id}:${filePath}`;
-            if (!entry.readonly) {
-                next.add(key);
-                if (!this.watchedFileVersionPaths.has(key)) {
-                    session.server.hostSocket?.watchFileVersion(filePath);
-                }
-            }
-
-            const info = await this.fetchTextFileInfoResult(
-                session,
-                filePath
-            );
-            if (info.ok) {
-                await this.handleWatchedFileVersionChanged(
-                    session.server,
-                    {
-                        type: 'file.version.changed',
-                        path: filePath,
-                        version: typeof info.data?.version === 'string'
-                            ? info.data.version
-                            : '',
-                        readonly: !!info.data?.readonly,
-                        deleted: false
-                    }
-                );
-            } else if (info.status === 404) {
-                await this.handleWatchedFileVersionChanged(
-                    session.server,
-                    {
-                        type: 'file.version.changed',
-                        path: filePath,
-                        version: '',
-                        readonly: false,
-                        deleted: true
-                    }
-                );
+            next.add(key);
+            if (!this.watchedFileVersionPaths.has(key)) {
+                session.server.hostSocket?.watchFileVersion(filePath);
             }
         }
         for (const key of this.watchedFileVersionPaths) {
@@ -4545,7 +4480,7 @@ class EditorManager {
     }
 
     refreshVisibleSessionTrees() {
-        this.requestVisibleTreeRefresh();
+        this.updateTreeAutoRefresh();
     }
 
     requestSessionTreeRefresh(session, { force = false } = {}) {
@@ -7092,7 +7027,11 @@ class EditorManager {
         // Only render tabs and content, file tree is persistent in sidebar
         const shouldShowWorkspace = this.hasVisibleWorkspaceTabs(session);
         if (shouldShowWorkspace) {
-            if (state.isVisible) {
+            if (
+                state.isVisible
+                && session.fileTreeElement
+                && session.fileTreeElement.children.length === 0
+            ) {
                 this.refreshSessionTree(session);
             }
             this.renderEditorTabs();

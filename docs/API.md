@@ -657,22 +657,7 @@ Errors:
 The `version` field is a SHA-256 of the file bytes and is used for optimistic
 concurrency.
 
-### 9.6 `GET /api/fs/info?path=...`
-
-Returns metadata only.
-
-Response:
-
-```json
-{
-  "readonly": false,
-  "version": "sha256",
-  "size": 1234,
-  "mtimeMs": 1775785247592
-}
-```
-
-### 9.7 `POST /api/fs/write`
+### 9.6 `POST /api/fs/write`
 
 Simple text write endpoint.
 
@@ -694,7 +679,7 @@ This endpoint does not use optimistic version checks.
 Heartbeat-based `fileWrites` are the preferred mutation path for editor-backed
 clients because they support conflict detection.
 
-### 9.8 `GET /api/fs/raw?path=...`
+### 9.7 `GET /api/fs/raw?path=...`
 
 Raw binary/file preview endpoint.
 
@@ -1628,7 +1613,6 @@ collapsed into one websocket namespace.
 - `POST /api/fs/rename`
 - `POST /api/fs/delete`
 - `GET /api/fs/read`
-- `GET /api/fs/info`
 - `GET /api/fs/raw`
 - `POST /api/fs/write`
 

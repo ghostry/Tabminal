@@ -14,6 +14,7 @@ import {
     buildTerminalSpawnRequest,
     createRestoreCaptureState,
     finalizeRestoreCaptureMessages,
+    findMessageIndexByStreamKey,
     getNextSyntheticStreamTurn,
     normalizeAgentTranscriptMessages,
     mergeAgentMessageText
@@ -683,6 +684,61 @@ describe('AcpManager', () => {
                 order: 103,
                 toolOrder: 102
             }
+        );
+    });
+
+    it('does not match reused message ids before the active prompt boundary', () => {
+        const messages = [
+            {
+                streamKey: 'message-1',
+                role: 'assistant',
+                kind: 'message',
+                text: 'old',
+                order: 12
+            },
+            {
+                streamKey: 'current-user',
+                role: 'user',
+                kind: 'message',
+                text: 'new prompt',
+                order: 20
+            }
+        ];
+
+        assert.equal(
+            findMessageIndexByStreamKey(
+                messages,
+                'message-1',
+                'assistant',
+                'message',
+                {
+                    searchWholeHistory: true,
+                    minOrder: 19
+                }
+            ),
+            -1
+        );
+
+        messages.push({
+            streamKey: 'message-1',
+            role: 'assistant',
+            kind: 'message',
+            text: 'current',
+            order: 21
+        });
+
+        assert.equal(
+            findMessageIndexByStreamKey(
+                messages,
+                'message-1',
+                'assistant',
+                'message',
+                {
+                    searchWholeHistory: true,
+                    minOrder: 19
+                }
+            ),
+            2
         );
     });
 

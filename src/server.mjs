@@ -1289,7 +1289,7 @@ class HostClientConnection {
 
     watchFileVersion(message) {
         const filePath = String(message?.payload?.path || message?.id || '').trim();
-        if (!filePath || this.fileVersionWatchers.has(filePath)) return;
+        if (!filePath) return;
         let timer = null;
         const push = async () => {
             try {
@@ -1321,6 +1321,10 @@ class HostClientConnection {
                 });
             }
         };
+        if (this.fileVersionWatchers.has(filePath)) {
+            void push();
+            return;
+        }
         try {
             const watcher = fs.watch(path.resolve(process.cwd(), filePath), () => {
                 clearTimeout(timer);
@@ -1335,12 +1339,17 @@ class HostClientConnection {
                     watcher.close();
                 }
             });
+            void push();
         } catch (error) {
-            this.send({
-                type: 'file.watch.error',
-                path: filePath,
-                error: error?.message || 'Unable to watch file'
-            });
+            if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+                void push();
+            } else {
+                this.send({
+                    type: 'file.watch.error',
+                    path: filePath,
+                    error: error?.message || 'Unable to watch file'
+                });
+            }
         }
     }
 

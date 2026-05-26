@@ -776,35 +776,6 @@ export const setupFsRoutes = (router) => {
         }
     });
 
-    router.get('/api/fs/info', async (ctx) => {
-        const filePath = ctx.query.path;
-        if (!filePath) {
-            ctx.status = 400;
-            ctx.body = { error: 'Path required' };
-            return;
-        }
-
-        try {
-            const fullPath = resolvePath(baseDir, filePath);
-            const snapshot = await readTextFileSnapshot(fullPath);
-            ctx.body = {
-                readonly: snapshot.readonly,
-                version: snapshot.version,
-                size: snapshot.size,
-                mtimeMs: snapshot.mtimeMs
-            };
-        } catch (err) {
-            if ((err?.status || 500) >= 500) {
-                console.error('FS Info Error:', err);
-            }
-            ctx.status = err?.status || 500;
-            ctx.body = {
-                error: err.message,
-                ...(err?.code ? { code: err.code } : {})
-            };
-        }
-    });
-
     // Raw file access (for previews like images and PDFs)
     router.get('/api/fs/raw', async (ctx) => {
         const filePath = ctx.query.path;

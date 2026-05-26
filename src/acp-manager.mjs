@@ -1771,7 +1771,7 @@ function getRestoreCaptureStreamKey(capture, update, role, kind, text = '') {
     return streamKey;
 }
 
-function findMessageIndexByStreamKey(
+export function findMessageIndexByStreamKey(
     messages = [],
     streamKey = '',
     role = '',
@@ -1782,27 +1782,35 @@ function findMessageIndexByStreamKey(
     if (!normalizedStreamKey) {
         return -1;
     }
+    const minOrder = Number.isFinite(options.minOrder)
+        ? options.minOrder
+        : null;
+    const isMatch = (message) => {
+        if (
+            minOrder !== null
+            && (!Number.isFinite(message?.order) || message.order <= minOrder)
+        ) {
+            return false;
+        }
+        return (
+            String(message?.streamKey || '') === normalizedStreamKey
+            && String(message?.role || '') === String(role || '')
+            && String(message?.kind || '') === String(kind || '')
+        );
+    };
     if (!options.searchWholeHistory) {
         const lastIndex = messages.length - 1;
         if (lastIndex < 0) {
             return -1;
         }
         const lastMessage = messages[lastIndex];
-        return (
-            String(lastMessage?.streamKey || '') === normalizedStreamKey
-            && String(lastMessage?.role || '') === String(role || '')
-            && String(lastMessage?.kind || '') === String(kind || '')
-        )
+        return isMatch(lastMessage)
             ? lastIndex
             : -1;
     }
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
-        if (
-            String(message?.streamKey || '') === normalizedStreamKey
-            && String(message?.role || '') === String(role || '')
-            && String(message?.kind || '') === String(kind || '')
-        ) {
+        if (isMatch(message)) {
             return index;
         }
     }
@@ -2647,6 +2655,7 @@ class AcpRuntime extends EventEmitter {
             activePromptCount: 0,
             activePromptIds: new Set(),
             activePromptPrimaryId: '',
+            activePromptTimelineStartOrder: null,
             promptCounter: 0,
             restoreCapture: null,
             currentModeId,
@@ -3049,6 +3058,7 @@ class AcpRuntime extends EventEmitter {
         tab.activePromptCount = 0;
         tab.activePromptIds = new Set();
         tab.activePromptPrimaryId = '';
+        tab.activePromptTimelineStartOrder = null;
         tab.promptCounter = 0;
         tab.plan = [];
         tab.usage = null;
@@ -3078,6 +3088,7 @@ class AcpRuntime extends EventEmitter {
         tab.activePromptCount = 0;
         tab.activePromptIds = new Set();
         tab.activePromptPrimaryId = '';
+        tab.activePromptTimelineStartOrder = null;
         tab.promptCounter = 0;
         tab.restoreCapture = null;
         restorePersistedTabSnapshot(tab, snapshot);
@@ -3360,6 +3371,11 @@ class AcpRuntime extends EventEmitter {
         if (!(tab.activePromptIds instanceof Set)) {
             tab.activePromptIds = new Set();
         }
+        if (tab.activePromptIds.size === 0) {
+            tab.activePromptTimelineStartOrder = Number.isFinite(tab.timelineCounter)
+                ? tab.timelineCounter
+                : 0;
+        }
         tab.promptCounter = Number.isFinite(tab.promptCounter)
             ? tab.promptCounter + 1
             : 1;
@@ -3401,6 +3417,7 @@ class AcpRuntime extends EventEmitter {
         tab.activePromptIds.clear();
         tab.activePromptCount = 0;
         tab.activePromptPrimaryId = '';
+        tab.activePromptTimelineStartOrder = null;
         tab.busy = false;
         tab.status = options.status || 'ready';
         return {
@@ -3947,7 +3964,10 @@ class AcpRuntime extends EventEmitter {
             role,
             kind,
             {
-                searchWholeHistory: !!update?.messageId
+                searchWholeHistory: !!update?.messageId,
+                minOrder: Number.isFinite(tab.activePromptTimelineStartOrder)
+                    ? tab.activePromptTimelineStartOrder
+                    : null
             }
         );
 
