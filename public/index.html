@@ -12,6 +12,65 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png">
     <link rel="manifest" href="./manifest.json">
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg-base: #002b36;
+            --text-base: #839496;
+        }
+
+        html,
+        body {
+            margin: 0;
+            min-width: 100%;
+            min-height: 100%;
+            background: var(--bg-base);
+            color: var(--text-base);
+        }
+
+        body:not(.tabminal-boot-ready) {
+            overflow: hidden;
+        }
+
+        body:not(.tabminal-boot-ready) .app-shell {
+            visibility: hidden;
+        }
+
+        .boot-loader {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483647;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-base);
+        }
+
+        .tabminal-boot-ready .boot-loader {
+            display: none;
+        }
+
+        .boot-loader-spinner {
+            width: 72px;
+            height: 72px;
+            border: 6px solid rgba(131, 148, 150, 0.22);
+            border-top-color: #2aa198;
+            border-radius: 50%;
+            animation: tabminalBootSpin 0.85s linear infinite;
+        }
+
+        @keyframes tabminalBootSpin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .boot-loader-spinner {
+                animation-duration: 1.6s;
+            }
+        }
+    </style>
     <script>
         const COMPACT_WORKSPACE_MAX_WIDTH = 767;
         const COMPACT_TERMINAL_TAB_MAX_WIDTH = 1408;
@@ -334,7 +393,8 @@
                 status: 'pending',
                 startedAt: Date.now(),
                 assetKey: '',
-                error: ''
+                error: '',
+                assets: {}
             };
             const readStoredRuntimeBootId = () => {
                 try {
@@ -448,6 +508,26 @@
                 }
             };
 
+            const markBootAsset = (name, status) => {
+                const state = window.__tabminalBootState;
+                if (!state || !name) return;
+                if (!state.assets || typeof state.assets !== 'object') {
+                    state.assets = {};
+                }
+                state.assets[name] = {
+                    status,
+                    updatedAt: Date.now()
+                };
+            };
+
+            const hasPendingBootAssets = () => {
+                const assets = window.__tabminalBootState?.assets;
+                if (!assets || typeof assets !== 'object') return false;
+                return Object.values(assets).some(
+                    (asset) => asset?.status === 'loading'
+                );
+            };
+
             const scheduleBootRecovery = (() => {
                 let timer = 0;
                 const hasVisibleLoginModal = () => {
@@ -478,6 +558,13 @@
                             clearBootRetryState();
                             return;
                         }
+                        if (hasPendingBootAssets()) {
+                            scheduleBootRecovery(
+                                'boot assets still loading',
+                                bootRecoveryProbeIntervalMs
+                            );
+                            return;
+                        }
                         const reachable = await probeRuntimeReachable();
                         if (!reachable) {
                             scheduleBootRecovery(
@@ -506,11 +593,25 @@
                     state.completedAt = Date.now();
                     state.error = '';
                 }
+                document.body?.classList.add('tabminal-boot-ready');
                 clearBootRetryState();
             };
 
             window.__tabminalMarkBootFailure = (reason) => {
                 scheduleBootRecovery(reason || 'boot failure');
+            };
+
+            window.__tabminalMarkBootAssetLoading = (name) => {
+                markBootAsset(name, 'loading');
+            };
+
+            window.__tabminalMarkBootAssetLoaded = (name) => {
+                markBootAsset(name, 'loaded');
+            };
+
+            window.__tabminalMarkBootAssetFailed = (name, reason) => {
+                markBootAsset(name, 'failed');
+                scheduleBootRecovery(reason || `${name} load failed`);
             };
 
             window.setTimeout(() => {
@@ -582,6 +683,9 @@
 </head>
 
 <body>
+    <div class="boot-loader" aria-label="Loading Tabminal" role="status">
+        <div class="boot-loader-spinner"></div>
+    </div>
     <div id="app-shell" class="app-shell">
     <div id="system-status-bar" class="system-status-bar">
         <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle Menu">
@@ -937,10 +1041,15 @@
             const link = document.createElement('link');
             link.rel = 'stylesheet';
             link.href = `./styles.css?v=${encodeURIComponent(runtimeBootId)}`;
+            window.__tabminalMarkBootAssetLoading?.('stylesheet');
+            link.onload = () => {
+                window.__tabminalMarkBootAssetLoaded?.('stylesheet');
+            };
             link.onerror = () => {
-                if (window.__tabminalMarkBootFailure) {
-                    window.__tabminalMarkBootFailure('stylesheet load failed');
-                }
+                window.__tabminalMarkBootAssetFailed?.(
+                    'stylesheet',
+                    'stylesheet load failed'
+                );
             };
             document.head.appendChild(link);
             const gitStatusLink = document.createElement('link');
@@ -950,10 +1059,15 @@
             const script = document.createElement('script');
             script.type = 'module';
             script.src = `./app.js?v=${encodeURIComponent(runtimeBootId)}`;
+            window.__tabminalMarkBootAssetLoading?.('app module');
+            script.onload = () => {
+                window.__tabminalMarkBootAssetLoaded?.('app module');
+            };
             script.onerror = () => {
-                if (window.__tabminalMarkBootFailure) {
-                    window.__tabminalMarkBootFailure('app module load failed');
-                }
+                window.__tabminalMarkBootAssetFailed?.(
+                    'app module',
+                    'app module load failed'
+                );
             };
             document.body.appendChild(script);
         })();
