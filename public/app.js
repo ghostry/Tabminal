@@ -11114,7 +11114,6 @@ async function saveAgentSetupConfig() {
     }
     const data = await response.json();
     updateAgentDefinitions(serverId, data?.definitions);
-    server.agentStateLoaded = false;
     await syncAgentsForServer(server, { force: true });
     const retrySession = agentSetupState.retrySessionKey
         ? state.sessions.get(agentSetupState.retrySessionKey) || null
@@ -11183,7 +11182,6 @@ async function resetAgentSetupConfig() {
     }
     const data = await response.json();
     updateAgentDefinitions(serverId, data?.definitions);
-    server.agentStateLoaded = false;
     await syncAgentsForServer(server, { force: true });
     const nextDefinition = getAgentDefinition(serverId, agentId);
     if (nextDefinition) {
@@ -17480,12 +17478,12 @@ function finishAgentStateApply(server, { restoring = false } = {}) {
     }
 }
 
-async function syncAgentsForServer(server, { force = false } = {}) {
+async function syncAgentsForServer(server, { force = false, full = false } = {}) {
     if (!server || !server.isAuthenticated) return;
     if (!force && server.agentStateLoaded) return;
 
     const params = new URLSearchParams();
-    const wantsFull = force || !server.agentStateLoaded;
+    const wantsFull = full || !server.agentStateLoaded;
     if (wantsFull) {
         params.set('full', '1');
     } else {
