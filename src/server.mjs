@@ -52,6 +52,7 @@ const AGENT_ATTACHMENT_FIELD = 'attachments';
 const MAX_AGENT_ATTACHMENTS = 8;
 const MAX_AGENT_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const MAX_AGENT_ATTACHMENTS_TOTAL_SIZE = 25 * 1024 * 1024;
+const SYSTEM_STATS_INTERVAL_MS = 10_000;
 
 function debugLog(...args) {
     if (config.debug) {
@@ -799,6 +800,65 @@ function serializeSessionSummary(session) {
     };
 }
 
+function buildAgentPatchComparableTab(tab) {
+    if (!tab || typeof tab !== 'object') return null;
+    const {
+        messages: _messages,
+        toolCalls: _toolCalls,
+        permissions: _permissions,
+        plan: _plan,
+        revision: _revision,
+        partial: _partial,
+        ...summary
+    } = tab;
+    return summary;
+}
+
+function isPlainObject(value) {
+    return !!(
+        value
+        && typeof value === 'object'
+        && !Array.isArray(value)
+    );
+}
+
+function buildJsonDelta(previous, value) {
+    if (JSON.stringify(previous) === JSON.stringify(value)) {
+        return undefined;
+    }
+    if (isPlainObject(previous) && isPlainObject(value)) {
+        const delta = {};
+        for (const [key, childValue] of Object.entries(value)) {
+            const childDelta = buildJsonDelta(previous[key], childValue);
+            if (childDelta !== undefined) {
+                delta[key] = childDelta;
+            }
+        }
+        return Object.keys(delta).length > 0 ? delta : undefined;
+    }
+    return value;
+}
+
+function buildAgentTabDelta(previous, tab) {
+    const summary = buildAgentPatchComparableTab(tab);
+    if (!summary?.id) return null;
+    if (!previous) return tab;
+
+    const delta = {
+        id: summary.id,
+        revision: tab.revision,
+        partial: true
+    };
+    for (const [key, value] of Object.entries(summary)) {
+        if (key === 'id') continue;
+        const valueDelta = buildJsonDelta(previous[key], value);
+        if (valueDelta !== undefined) {
+            delta[key] = valueDelta;
+        }
+    }
+    return Object.keys(delta).length > 3 ? delta : null;
+}
+
 function safeSendJson(socket, message) {
     if (!socket || socket.readyState !== WS_STATE_OPEN) return false;
     socket.send(JSON.stringify(message));
@@ -851,6 +911,11 @@ class HostClientConnection {
         this.systemTimer = null;
         this.disposed = false;
         this.lastAgentRevision = 0;
+        this.agentInventoryLoaded = false;
+        this.agentHelloInFlight = false;
+        this.agentPushInFlight = false;
+        this.agentPushPending = false;
+        this.agentTabSummaries = new Map();
 
         this.boundSessionCreated = (session) => {
             this.pushSessionSummary(session, { force: true });
@@ -882,7 +947,7 @@ class HostClientConnection {
                 type: 'system.stats',
                 system: systemMonitor.getStats()
             });
-        }, 1000);
+        }, SYSTEM_STATS_INTERVAL_MS);
         this.systemTimer.unref?.();
         void this.sendHello();
     }
@@ -896,49 +961,150 @@ class HostClientConnection {
             type: 'server.hello',
             runtime: { bootId: SERVER_BOOT_ID },
             sessions: terminalManager.listClientSessions(),
-            agents: await acpManager.listState({ full: true }),
             system: systemMonitor.getStats()
         });
         for (const session of terminalManager.sessions.values()) {
             this.rememberSessionSummary(session);
         }
-        this.lastAgentRevision = acpManager.stateRevision || 0;
-    }
 
-    async pushAgentState() {
+        this.agentHelloInFlight = true;
         try {
-            const agents = await acpManager.listState({
-                full: false,
-                since: this.lastAgentRevision
-            });
-            if (
-                agents
-                && Array.isArray(agents.tabs)
-                && agents.tabs.length === 0
-                && Array.isArray(agents.removedTabs)
-                && agents.removedTabs.length === 0
-                && !Array.isArray(agents.definitions)
-                && !Array.isArray(agents.configs)
-            ) {
-                this.lastAgentRevision = Math.max(
-                    this.lastAgentRevision,
-                    Number.isFinite(agents.revision) ? agents.revision : 0
-                );
-                return;
-            }
+            const agents = await acpManager.listState({ full: true });
             this.send({
                 type: 'agent.inventory',
                 agents
             });
-            if (Number.isFinite(agents?.revision)) {
-                this.lastAgentRevision = Math.max(
-                    this.lastAgentRevision,
-                    agents.revision
-                );
+            this.rememberAgentTabSummaries(agents?.tabs || []);
+            this.lastAgentRevision = Number.isFinite(agents?.revision)
+                ? agents.revision
+                : 0;
+            this.agentInventoryLoaded = true;
+        } catch {
+            // 保持 Host 连接可用；后续状态变化或显式刷新会重试 agent 清单。
+        } finally {
+            this.agentHelloInFlight = false;
+            if (this.agentPushPending) {
+                this.agentPushPending = false;
+                void this.pushAgentState();
             }
+        }
+    }
+
+    async pushAgentState() {
+        if (this.agentHelloInFlight) {
+            this.agentPushPending = true;
+            return;
+        }
+        if (this.agentPushInFlight) {
+            this.agentPushPending = true;
+            return;
+        }
+        this.agentPushInFlight = true;
+        try {
+            do {
+                this.agentPushPending = false;
+                if (!this.agentInventoryLoaded) {
+                    const agents = await acpManager.listState({ full: true });
+                    this.send({
+                        type: 'agent.inventory',
+                        agents
+                    });
+                    this.rememberAgentTabSummaries(agents?.tabs || []);
+                    this.lastAgentRevision = Number.isFinite(agents?.revision)
+                        ? agents.revision
+                        : 0;
+                    this.agentInventoryLoaded = true;
+                    continue;
+                }
+                let agents = await acpManager.listState({
+                    full: false,
+                    since: this.lastAgentRevision,
+                    timeline: false
+                });
+                if (
+                    Array.isArray(agents?.tabs)
+                    && agents.tabs.some((tab) => {
+                        const id = String(tab?.id || '').trim();
+                        return id && !this.agentTabSummaries.has(id);
+                    })
+                ) {
+                    agents = await acpManager.listState({
+                        full: false,
+                        since: this.lastAgentRevision,
+                        timeline: true
+                    });
+                }
+                const patch = this.prepareAgentPatch(agents);
+                if (
+                    patch
+                    && Array.isArray(patch.tabs)
+                    && patch.tabs.length === 0
+                    && Array.isArray(patch.removedTabs)
+                    && patch.removedTabs.length === 0
+                    && !Array.isArray(patch.definitions)
+                    && !Array.isArray(patch.configs)
+                ) {
+                    this.lastAgentRevision = Math.max(
+                        this.lastAgentRevision,
+                        Number.isFinite(agents.revision) ? agents.revision : 0
+                    );
+                    continue;
+                }
+                this.send({
+                    type: 'agent.patch',
+                    patch
+                });
+                if (Number.isFinite(agents?.revision)) {
+                    this.lastAgentRevision = Math.max(
+                        this.lastAgentRevision,
+                        agents.revision
+                    );
+                }
+            } while (this.agentPushPending && !this.disposed);
         } catch {
             // Ignore transient agent inventory failures.
+        } finally {
+            this.agentPushInFlight = false;
         }
+    }
+
+    rememberAgentTabSummaries(tabs = []) {
+        for (const tab of Array.isArray(tabs) ? tabs : []) {
+            const summary = buildAgentPatchComparableTab(tab);
+            if (summary?.id) {
+                this.agentTabSummaries.set(summary.id, summary);
+            }
+        }
+    }
+
+    prepareAgentPatch(agents) {
+        if (!agents || typeof agents !== 'object') return agents;
+        const tabs = [];
+        for (const tab of Array.isArray(agents.tabs) ? agents.tabs : []) {
+            const id = String(tab?.id || '').trim();
+            if (!id) continue;
+            const previous = this.agentTabSummaries.get(id) || null;
+            const delta = buildAgentTabDelta(previous, tab);
+            const nextSummary = buildAgentPatchComparableTab(tab);
+            if (nextSummary) {
+                this.agentTabSummaries.set(id, nextSummary);
+            }
+            if (delta) {
+                tabs.push(delta);
+            }
+        }
+        for (const removed of Array.isArray(agents.removedTabs)
+            ? agents.removedTabs
+            : []) {
+            const id = typeof removed === 'string' ? removed : removed?.id;
+            if (id) {
+                this.agentTabSummaries.delete(id);
+            }
+        }
+        return {
+            ...agents,
+            tabs
+        };
     }
 
     rememberSessionSummary(session) {

@@ -57,7 +57,7 @@ clearDeprecatedPasswordHashAuthStorage();
 const IS_MOBILE = navigator.maxTouchPoints > 0;
 
 const AGENT_MESSAGE_MAX_RENDER_BYTES = 64 * 1024;
-const AGENT_BUSY_SYNC_DELAY_MS = 3000;
+const SYSTEM_STATS_INTERVAL_MS = 10_000;
 
 // #region DOM Elements
 const terminalEl = document.getElementById('terminal');
@@ -906,9 +906,37 @@ function buildWorkspaceSnapshotForSession(session, overrides = {}) {
     });
 }
 
+function getWorkspaceSnapshotContentSignature(snapshot) {
+    const normalized = normalizeWorkspaceSnapshot(snapshot);
+    return JSON.stringify({
+        isVisible: normalized.isVisible,
+        openFiles: normalized.openFiles,
+        terminalDisplayMode: normalized.terminalDisplayMode,
+        terminalDisplayModeExplicit: normalized.terminalDisplayModeExplicit,
+        expandedPaths: normalized.expandedPaths,
+        markdownSplitPath: normalized.markdownSplitPath,
+        activeWorkspaceTabKey: normalized.activeWorkspaceTabKey
+    });
+}
+
+function hasWorkspaceSnapshotContentChanged(left, right) {
+    return getWorkspaceSnapshotContentSignature(left)
+        !== getWorkspaceSnapshotContentSignature(right);
+}
+
 function touchSharedWorkspace(session, overrides = {}) {
     if (!session) return null;
-    const snapshot = buildWorkspaceSnapshotForSession(session, {
+    const nextSnapshot = buildWorkspaceSnapshotForSession(session, overrides);
+    if (
+        !hasWorkspaceSnapshotContentChanged(
+            session.sharedWorkspaceState,
+            nextSnapshot
+        )
+    ) {
+        return null;
+    }
+    const snapshot = normalizeWorkspaceSnapshot({
+        ...nextSnapshot,
         ...overrides,
         updatedAt: Date.now(),
         updatedBy: getWorkspaceDeviceId()
@@ -1307,7 +1335,11 @@ class HostSocket {
 
     subscribeAgent(agentTab) {
         if (!agentTab?.id) return;
+        const alreadySubscribed = this.agentTabs.has(agentTab.id);
         this.agentTabs.set(agentTab.id, agentTab);
+        if (alreadySubscribed && this.isOpen()) {
+            return;
+        }
         if (this.isOpen()) {
             this.send({
                 type: 'subscribe',
@@ -1432,6 +1464,9 @@ class HostSocket {
                 break;
             case 'agent.inventory':
                 await this.applyAgentState(message.agents);
+                break;
+            case 'agent.patch':
+                await this.applyAgentState(message.patch || message.agents);
                 break;
             case 'terminal.message': {
                 const session = this.terminalSessions.get(message.id)
@@ -8178,12 +8213,7 @@ class EditorManager {
                 }
             }
             if (pendingAuthoritativeSync && agentTab.server?.isAuthenticated) {
-                try {
-                    await syncAgentsForServer(agentTab.server, { force: true });
-                } catch {
-                    // Ignore transient authority sync failures. The next
-                    // heartbeat or state refresh will reconcile.
-                }
+                void agentTab.server.startHeartbeat();
             }
         } finally {
             renderState.inFlight = false;
@@ -12005,8 +12035,11 @@ class Session {
         if (!touchWorkspace) {
             return;
         }
-        const pending = getPendingSession(this.key);
         const workspaceState = touchSharedWorkspace(this);
+        if (!workspaceState) {
+            return;
+        }
+        const pending = getPendingSession(this.key);
         pending.workspaceState = workspaceState;
         if (
             this.server?.hostSocket?.sendSessionPatch?.(this.id, {
@@ -13098,19 +13131,7 @@ class AgentTab {
         if (!this.#needsBusyStateRefresh()) {
             return;
         }
-        this.busySyncTimer = setTimeout(() => {
-            this.busySyncTimer = null;
-            if (!this.#needsBusyStateRefresh()) {
-                return;
-            }
-            void syncAgentsForServer(this.server, { force: true })
-                .catch(() => {})
-                .finally(() => {
-                    if (this.#needsBusyStateRefresh()) {
-                        this.#syncBusyWatchdog();
-                    }
-                });
-        }, AGENT_BUSY_SYNC_DELAY_MS);
+        void this.server?.startHeartbeat?.();
     }
 
     #normalizeTimelineEntry(entry, fallbackOrder = null) {
@@ -13507,7 +13528,18 @@ class AgentTab {
             busy: !!this.busy,
             errorMessage: this.errorMessage || '',
             currentModeId: this.currentModeId || '',
-            sessionCapabilities: this.sessionCapabilities || null
+            availableModes: this.availableModes || [],
+            availableCommands: this.availableCommands || [],
+            configOptions: this.configOptions || [],
+            sessionCapabilities: this.sessionCapabilities || null,
+            usage: this.usage || null,
+            terminals: Array.from(this.terminals?.values?.() || []),
+            timelineWindow: {
+                start: this.timelineWindowStart,
+                end: this.timelineWindowEnd,
+                total: this.timelineWindowTotal,
+                hasMoreBefore: this.timelineWindowHasMoreBefore
+            }
         });
         this.runtimeId = data.runtimeId || this.runtimeId || '';
         this.runtimeKey = data.runtimeKey || this.runtimeKey || '';
@@ -13533,10 +13565,28 @@ class AgentTab {
             ? data.configOptions
             : this.configOptions;
         this.sessionCapabilities = normalizeAgentSessionCapabilities(
-            data.sessionCapabilities || this.sessionCapabilities
+            data.sessionCapabilities
+                ? mergeObjectDelta(this.sessionCapabilities, data.sessionCapabilities)
+                : this.sessionCapabilities
         );
         if (data.usage) {
-            this.usage = this.#normalizeUsageState(data.usage);
+            this.usage = this.#normalizeUsageState(
+                mergeObjectDelta(this.usage, data.usage)
+            );
+        }
+        if (Array.isArray(data.terminals)) {
+            this.terminals = new Map();
+            for (const terminal of data.terminals) {
+                if (terminal?.terminalId) {
+                    this.terminals.set(
+                        terminal.terminalId,
+                        this.#normalizeTerminalSummary(terminal)
+                    );
+                }
+            }
+        }
+        if (data.timelineWindow) {
+            this.updateTimelineWindow(data.timelineWindow);
         }
         const nextSession = this.getLinkedSession();
         const nextSnapshot = JSON.stringify({
@@ -13554,7 +13604,18 @@ class AgentTab {
             busy: !!this.busy,
             errorMessage: this.errorMessage || '',
             currentModeId: this.currentModeId || '',
-            sessionCapabilities: this.sessionCapabilities || null
+            availableModes: this.availableModes || [],
+            availableCommands: this.availableCommands || [],
+            configOptions: this.configOptions || [],
+            sessionCapabilities: this.sessionCapabilities || null,
+            usage: this.usage || null,
+            terminals: Array.from(this.terminals?.values?.() || []),
+            timelineWindow: {
+                start: this.timelineWindowStart,
+                end: this.timelineWindowEnd,
+                total: this.timelineWindowTotal,
+                hasMoreBefore: this.timelineWindowHasMoreBefore
+            }
         });
         const changed = previousSnapshot !== nextSnapshot
             || previousSession?.key !== nextSession?.key;
@@ -14052,6 +14113,29 @@ function normalizeAgentConfigOptionOptions(options) {
         }
     }
     return flattened;
+}
+
+function mergeObjectDelta(base, delta) {
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) {
+        return delta;
+    }
+    const source = base && typeof base === 'object' && !Array.isArray(base)
+        ? base
+        : {};
+    const next = { ...source };
+    for (const [key, value] of Object.entries(delta)) {
+        next[key] = (
+            value
+            && typeof value === 'object'
+            && !Array.isArray(value)
+            && source[key]
+            && typeof source[key] === 'object'
+            && !Array.isArray(source[key])
+        )
+            ? mergeObjectDelta(source[key], value)
+            : value;
+    }
+    return next;
 }
 
 function normalizeAgentSessionCapabilities(sessionCapabilities) {
@@ -17252,7 +17336,9 @@ function upsertAgentTab(server, data) {
     if (existing) {
         const hasLiveSocket = existing.server.hostSocket?.isOpen();
         let shouldNotify = true;
-        if (
+        if (data.partial === true) {
+            shouldNotify = existing.applyInventory(data);
+        } else if (
             hasLiveSocket
             && !shouldApplyAuthoritativeAgentSnapshot(existing, data)
         ) {
@@ -17480,15 +17566,15 @@ function finishAgentStateApply(server, { restoring = false } = {}) {
 
 async function syncAgentsForServer(server, { force = false, full = false } = {}) {
     if (!server || !server.isAuthenticated) return;
-    if (!force && server.agentStateLoaded) return;
+    if (server.agentStateLoaded && !full) {
+        if (force) {
+            void server.startHeartbeat();
+        }
+        return;
+    }
 
     const params = new URLSearchParams();
-    const wantsFull = full || !server.agentStateLoaded;
-    if (wantsFull) {
-        params.set('full', '1');
-    } else {
-        params.set('since', String(server.agentStateRevision));
-    }
+    params.set('full', '1');
     const requestPath = `/api/agents?${params.toString()}`;
     const response = await server.fetch(requestPath);
     if (!response.ok) {
@@ -18049,7 +18135,10 @@ function drawServerHeartbeatCanvas(canvas, server) {
     if (history.length < 2) return;
 
     const now = performance.now();
-    const progress = Math.min((now - server.heartbeatLastUpdateTime) / 1000, 1.0);
+    const progress = Math.min(
+        (now - server.heartbeatLastUpdateTime) / SYSTEM_STATS_INTERVAL_MS,
+        1.0
+    );
     const step = width / VISIBLE_POINTS;
 
     let maxVal = 0;

@@ -270,6 +270,31 @@ function sliceSerializedTabTimeline(serialized = {}, options = {}) {
     }
     return next;
 }
+
+function summarizeSerializedTabInventory(serialized = {}) {
+    const {
+        messages: _messages,
+        toolCalls: _toolCalls,
+        permissions: _permissions,
+        plan: _plan,
+        terminals,
+        ...summary
+    } = serialized;
+    const timelineTotal = getSerializedTabTimeline(serialized).length;
+    return {
+        ...summary,
+        partial: true,
+        terminals: Array.isArray(terminals)
+            ? terminals.map((item) => compactTerminalSummary(item))
+            : [],
+        timelineWindow: {
+            start: timelineTotal,
+            end: timelineTotal,
+            total: timelineTotal,
+            hasMoreBefore: timelineTotal > 0
+        }
+    };
+}
 const DEFAULT_AVAILABILITY_OVERRIDE_TTL_MS = 30 * 1000;
 const DEFAULT_PROBE_CACHE_TTL_MS = 15 * 1000;
 const DEFAULT_TRANSCRIPT_PERSIST_DELAY_MS = 250;
@@ -4879,6 +4904,16 @@ export class AcpManager extends EventEmitter {
         };
     }
 
+    #serializeAgentStatePatchTab(tabId, entry) {
+        if (!entry) return null;
+        const serialized = entry.serialize();
+        if (!serialized) return null;
+        return {
+            ...summarizeSerializedTabInventory(serialized),
+            revision: this.tabRevisions.get(tabId) || 0
+        };
+    }
+
     getTabTimelineWindow(tabId, options = {}) {
         const entry = this.tabs.get(tabId);
         if (!entry) return null;
@@ -4968,11 +5003,14 @@ export class AcpManager extends EventEmitter {
         const full = options.full === true || !Number.isFinite(options.since);
         if (!full) {
             const since = Math.max(0, options.since);
+            const includeTimeline = options.timeline !== false;
             const tabs = [];
             for (const [tabId, entry] of this.tabs.entries()) {
                 const revision = this.tabRevisions.get(tabId) || 0;
                 if (revision <= since) continue;
-                const serialized = this.#serializeAgentStateTab(tabId, entry);
+                const serialized = includeTimeline
+                    ? this.#serializeAgentStateTab(tabId, entry)
+                    : this.#serializeAgentStatePatchTab(tabId, entry);
                 if (serialized) {
                     tabs.push(serialized);
                 }

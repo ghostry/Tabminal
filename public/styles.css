@@ -409,6 +409,11 @@ body {
     /* padding-left removed to keep layout stable */
 }
 
+.tab-item:not(.editor-open) {
+    height: 96px;
+    min-height: 96px;
+}
+
 /* ... (keep existing styles) ... */
 
 .new-tab-item {
@@ -761,6 +766,11 @@ body {
     align-items: flex-start;
     justify-content: flex-start;
     min-height: 0;
+}
+
+.tab-item:not(.editor-open) .preview-container {
+    height: 100% !important;
+    min-height: 100%;
 }
 
 .preview-container .xterm-viewport {
@@ -4485,24 +4495,12 @@ kbd {
     color: #ff6b67;
 }
 
-.tab-item:not(.active) .tab-file-tree {
-    max-height: 65px;
-    /* Approx 3 items */
-    pointer-events: none;
-    opacity: 0.6;
-    overflow: hidden;
-}
-
-.tab-item.active .tab-file-tree {
+.tab-item.editor-open .tab-file-tree {
+    display: block;
     max-height: 600px;
-    /* Approx 30 items */
     pointer-events: auto;
     opacity: 1;
     overflow: auto;
-}
-
-.tab-item.editor-open .tab-file-tree {
-    display: block;
 }
 
 .tab-file-tree ul {

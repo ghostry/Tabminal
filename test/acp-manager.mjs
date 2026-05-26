@@ -1699,6 +1699,46 @@ describe('AcpManager', () => {
         );
     });
 
+    it('returns compact incremental agent patch state without timeline history', async () => {
+        const { manager } = createManager();
+        const first = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-1'
+        });
+        const baseline = await manager.listState({ full: true });
+        const runtimeEntry = manager.runtimes.values().next().value;
+        const runtimeTab = runtimeEntry.runtime.tabs.get(first.id);
+        runtimeTab.status = 'running';
+        runtimeTab.busy = true;
+        runtimeTab.messages = Array.from({ length: 20 }, (_, index) => ({
+            id: `message-${index}`,
+            streamKey: `message-${index}`,
+            role: 'assistant',
+            kind: 'message',
+            text: `message ${index}`,
+            order: index + 1
+        }));
+        runtimeEntry.runtime.emit('tab_dirty', { tabId: first.id });
+
+        const delta = await manager.listState({
+            since: baseline.revision,
+            timeline: false
+        });
+
+        assert.equal(delta.full, false);
+        assert.equal(delta.tabs.length, 1);
+        assert.equal(delta.tabs[0].id, first.id);
+        assert.equal(delta.tabs[0].partial, true);
+        assert.equal(delta.tabs[0].status, 'running');
+        assert.equal(delta.tabs[0].busy, true);
+        assert.equal(delta.tabs[0].messages, undefined);
+        assert.equal(delta.tabs[0].toolCalls, undefined);
+        assert.equal(delta.tabs[0].permissions, undefined);
+        assert.equal(delta.tabs[0].plan, undefined);
+        assert.equal(delta.tabs[0].timelineWindow.total, 20);
+    });
+
     it('creates tabs with an initial mode when requested', async () => {
         const { manager } = createManager();
         const tab = await manager.createTab({
