@@ -281,37 +281,91 @@
             // Sidebar resizer drag-to-resize
             const resizer = document.getElementById('sidebar-resizer');
             if (resizer) {
-                const savedWidth = localStorage.getItem('tabminal_sidebar_width');
-                if (savedWidth) {
-                    sidebar.style.width = savedWidth;
+                const storageKey = 'tabminal_sidebar_width';
+                const minWidth = 200;
+                const maxWidth = 520;
+                const readRootPixelValue = (name) => {
+                    const value = getComputedStyle(document.documentElement)
+                        .getPropertyValue(name);
+                    const parsed = parseFloat(value);
+                    return Number.isFinite(parsed) ? parsed : 0;
+                };
+                const clampSidebarWidth = (width) => {
+                    const viewportWidth = readRootPixelValue('--shell-width')
+                        || readRootPixelValue('--app-width')
+                        || window.innerWidth
+                        || maxWidth;
+                    const viewportMaxWidth = Math.max(minWidth, viewportWidth - 48);
+                    return Math.min(
+                        Math.max(width, minWidth),
+                        Math.min(maxWidth, viewportMaxWidth)
+                    );
+                };
+                const applySidebarWidth = (width) => {
+                    const nextWidth = clampSidebarWidth(width);
+                    sidebar.style.width = `${nextWidth}px`;
+                    document.documentElement.style.setProperty(
+                        '--tabminal-sidebar-width',
+                        `${nextWidth}px`
+                    );
+                    return nextWidth;
+                };
+                try {
+                    const savedWidth = parseInt(localStorage.getItem(storageKey), 10);
+                    if (Number.isFinite(savedWidth)) {
+                        applySidebarWidth(savedWidth);
+                    }
+                } catch {
+                    // Ignore storage failures; resizing still works in-session.
                 }
 
-                resizer.addEventListener('mousedown', function(e) {
+                resizer.addEventListener('pointerdown', function(e) {
+                    if (e.button !== undefined && e.button !== 0) {
+                        return;
+                    }
                     e.preventDefault();
+                    e.stopPropagation();
                     document.body.style.cursor = 'col-resize';
                     document.body.style.userSelect = 'none';
                     resizer.classList.add('dragging');
+                    resizer.setPointerCapture?.(e.pointerId);
 
-                    const startX = e.clientX;
-                    const startWidth = parseInt(getComputedStyle(sidebar).width, 10);
+                    const sidebarRect = sidebar.getBoundingClientRect();
+                    const startWidth = parseFloat(getComputedStyle(sidebar).width)
+                        || sidebarRect.width;
+                    const visualToLayoutScale = sidebarRect.width > 0
+                        ? sidebarRect.width / startWidth
+                        : 1;
+                    let nextWidth = Math.round(startWidth);
 
-                    function onMouseMove(e) {
-                        const delta = e.clientX - startX;
-                        const newWidth = Math.min(Math.max(startWidth + delta, 100), 500);
-                        sidebar.style.width = newWidth + 'px';
+                    function onPointerMove(e) {
+                        nextWidth = applySidebarWidth(
+                            Math.round(
+                                (e.clientX - sidebarRect.left) / visualToLayoutScale
+                            )
+                        );
                     }
 
-                    function onMouseUp() {
+                    function onPointerUp(e) {
                         document.body.style.cursor = '';
                         document.body.style.userSelect = '';
                         resizer.classList.remove('dragging');
-                        window.removeEventListener('mousemove', onMouseMove);
-                        window.removeEventListener('mouseup', onMouseUp);
-                        localStorage.setItem('tabminal_sidebar_width', sidebar.style.width);
+                        if (resizer.hasPointerCapture?.(e.pointerId)) {
+                            resizer.releasePointerCapture(e.pointerId);
+                        }
+                        window.removeEventListener('pointermove', onPointerMove);
+                        window.removeEventListener('pointerup', onPointerUp);
+                        window.removeEventListener('pointercancel', onPointerUp);
+                        try {
+                            localStorage.setItem(storageKey, `${nextWidth}px`);
+                        } catch {
+                            // Ignore storage failures; the applied width remains.
+                        }
                     }
 
-                    window.addEventListener('mousemove', onMouseMove);
-                    window.addEventListener('mouseup', onMouseUp);
+                    window.addEventListener('pointermove', onPointerMove);
+                    window.addEventListener('pointerup', onPointerUp);
+                    window.addEventListener('pointercancel', onPointerUp);
                 });
             }
         });
@@ -711,8 +765,8 @@
                     <button id="add-server-button" class="new-tab-button" aria-label="Add Host">+ Add Host</button>
                 </li>
             </ul>
+            <div id="sidebar-resizer" class="sidebar-resizer" aria-hidden="true"></div>
         </aside>
-        <div id="sidebar-resizer" class="sidebar-resizer" style="cursor: col-resize;"></div>
         <main id="terminal-container" class="terminal-container">
             <div id="editor-pane" class="editor-pane" style="display: none;">
                 <div class="editor-workspace">

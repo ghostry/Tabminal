@@ -255,12 +255,15 @@ body {
     display: flex;
     flex-direction: column;
     width: 200px;
+    min-width: 200px;
+    max-width: calc(var(--shell-width, var(--app-width, 100vw)) - 48px);
     flex-shrink: 0;
     background-color: var(--bg-base);
     padding: 10px;
     padding-left: max(10px, env(safe-area-inset-left));
     padding-bottom: max(10px, env(safe-area-inset-bottom));
     border-right: 1px solid var(--border-color);
+    position: relative;
 }
 
 /* Sidebar Toggle */
@@ -314,7 +317,7 @@ body {
         left: 0;
         top: 0;
         height: 100%;
-        width: 240px;
+        width: var(--tabminal-sidebar-width, 240px);
         /* Slightly wider for touch */
         z-index: 900;
         transform: translateX(-100%);
@@ -346,7 +349,7 @@ body {
     left: 0;
     top: 0;
     height: 100%;
-    width: 240px;
+    width: var(--tabminal-sidebar-width, 240px);
     z-index: 900;
     transform: translateX(-100%);
     visibility: hidden;
@@ -1576,12 +1579,15 @@ kbd {
 
 /* Sidebar Resizer (vertical split) */
 .sidebar-resizer {
-    width: 6px;
+    position: absolute;
+    top: 0;
+    right: -4px;
+    bottom: 0;
+    width: 10px;
     background-color: transparent;
     cursor: col-resize;
-    flex-shrink: 0;
-    z-index: 20;
-    position: relative;
+    z-index: 30;
+    touch-action: none;
     transition: background-color 0.15s ease;
 }
 
