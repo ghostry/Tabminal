@@ -6636,12 +6636,20 @@ class EditorManager {
         this.pdfPreviewContainer.style.display = 'none';
     }
 
-    getPdfPreviewUrl(filePath, session = this.currentSession) {
+    getRawFileUrl(filePath, session = this.currentSession, options = {}) {
         if (!session) return '';
+        const cacheBust = options.cacheBust === false
+            ? ''
+            : `&v=${encodeURIComponent(String(Date.now()))}`;
         return session.server.resolveUrl(
             `/api/fs/raw?path=${encodeURIComponent(filePath)}`
             + `&token=${session.server.token}`
+            + cacheBust
         );
+    }
+
+    getPdfPreviewUrl(filePath, session = this.currentSession) {
+        return this.getRawFileUrl(filePath, session);
     }
 
     getPdfPreviewTargetWidth() {
@@ -7148,7 +7156,8 @@ class EditorManager {
         const isImage = isSupportedImagePath(filePath);
         const isPdf = isSupportedPdfPath(filePath);
 
-        if (!this.getModel(filePath, targetSession)) {
+        const existingEntry = this.getModel(filePath, targetSession);
+        if (!isImage && !isPdf) {
             let model = null;
             let content = null;
             let readonly = false;
@@ -7156,12 +7165,15 @@ class EditorManager {
             let size = 0;
             let mtimeMs = 0;
 
-            if (!isImage && !isPdf) {
-                try {
-                    const data = await this.readTextFileSnapshot(
-                        targetSession,
-                        filePath
-                    );
+            try {
+                const data = await this.readTextFileSnapshot(
+                    targetSession,
+                    filePath
+                );
+                if (existingEntry?.type === 'text') {
+                    this.applyTextFileSnapshot(targetSession, filePath, data);
+                    this.clearPendingFileWrite(targetSession.key, filePath);
+                } else {
                     content = data.content;
                     readonly = data.readonly;
                     version = typeof data.version === 'string'
@@ -7171,44 +7183,65 @@ class EditorManager {
                     mtimeMs = Number.isFinite(data.mtimeMs)
                         ? data.mtimeMs
                         : 0;
-                    
+
                     if (this.monacoInstance) {
                         const uri = this.monacoInstance.Uri.file(filePath);
                         const existing = this.monacoInstance.editor.getModel(uri);
                         if (existing) {
-                            existing.setValue(content);
+                            this.suppressFileWriteCapture = true;
+                            try {
+                                existing.setValue(content);
+                            } finally {
+                                this.suppressFileWriteCapture = false;
+                            }
                             model = existing;
                         } else {
                             model = this.monacoInstance.editor.createModel(content, undefined, uri);
                         }
                     }
-                } catch (err) {
-                    if (err?.message === 'Unsupported file type') {
-                        await showConfirmModal({
-                            title: 'Unsupported File Type',
-                            message: 'This file type is not supported yet.',
-                            note: 'Only text files, supported images, and PDFs can be opened right now.',
-                            confirmLabel: 'OK',
-                            hideCancel: true,
-                            returnFocus: document.activeElement
-                        });
-                        return;
-                    }
-                    alert(`Failed to open file: ${err.message}`, { type: 'error', title: 'Error' });
-                    this.closeFile(filePath);
+                }
+            } catch (err) {
+                if (err?.message === 'Unsupported file type') {
+                    await showConfirmModal({
+                        title: 'Unsupported File Type',
+                        message: 'This file type is not supported yet.',
+                        note: 'Only text files, supported images, and PDFs can be opened right now.',
+                        confirmLabel: 'OK',
+                        hideCancel: true,
+                        returnFocus: document.activeElement
+                    });
                     return;
                 }
+                alert(`Failed to open file: ${err.message}`, { type: 'error', title: 'Error' });
+                this.closeFile(filePath);
+                return;
             }
 
+            if (existingEntry?.type !== 'text') {
+                this.setModel(filePath, {
+                    type: 'text',
+                    model: model,
+                    content: content,
+                    readonly: readonly,
+                    version,
+                    contentVersion: version,
+                    size,
+                    mtimeMs,
+                    lastDismissedRemoteVersion: '',
+                    userEdited: false,
+                    pendingRemoteConflict: null
+                }, targetSession);
+            }
+        } else if (!existingEntry) {
             this.setModel(filePath, {
-                type: isImage ? 'image' : isPdf ? 'pdf' : 'text',
-                model: model,
-                content: content,
-                readonly: readonly,
-                version,
-                contentVersion: version,
-                size,
-                mtimeMs,
+                type: isImage ? 'image' : 'pdf',
+                model: null,
+                content: null,
+                readonly: false,
+                version: '',
+                contentVersion: '',
+                size: 0,
+                mtimeMs: 0,
                 lastDismissedRemoteVersion: '',
                 userEdited: false,
                 pendingRemoteConflict: null
@@ -7236,6 +7269,20 @@ class EditorManager {
 
     closeFile(filePath) {
         if (!this.currentSession) return;
+        const pendingWrite = this.getPendingFileWrite(
+            this.currentSession,
+            filePath
+        );
+        if (pendingWrite?.blocked) {
+            alert('Resolve the save conflict before closing this file.', {
+                type: 'warning',
+                title: 'Save Blocked'
+            });
+            return;
+        }
+        if (pendingWrite && pendingWrite.content !== undefined) {
+            requestImmediateServerSync(this.currentSession.server, 0);
+        }
         const state = this.currentSession.editorState;
         if (this.getMarkdownSplitPath(this.currentSession) === filePath) {
             this.currentSession.workspaceState.markdownSplitPath = '';
@@ -7900,8 +7947,9 @@ class EditorManager {
                 this.imagePreview.onerror = null;
             };
             
-            this.imagePreview.src = this.currentSession.server.resolveUrl(
-                `/api/fs/raw?path=${encodeURIComponent(filePath)}&token=${this.currentSession.server.token}`
+            this.imagePreview.src = this.getRawFileUrl(
+                filePath,
+                this.currentSession
             );
         } else if (file.type === 'pdf') {
             this.agentContainer.style.display = 'none';

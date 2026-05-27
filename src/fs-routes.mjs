@@ -783,6 +783,9 @@ export const setupFsRoutes = (router) => {
             ctx.status = 400;
             return;
         }
+        ctx.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        ctx.set('Pragma', 'no-cache');
+        ctx.set('Expires', '0');
 
         try {
             const fullPath = resolvePath(baseDir, filePath);
