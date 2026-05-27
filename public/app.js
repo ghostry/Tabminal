@@ -13709,6 +13709,60 @@ const pendingChanges = {
     sessions: new Map() // sessionKey -> { resize, workspaceState, fileWrites: Map<path, content> }
 };
 
+const closingSessionKeys = new Set();
+const closedSessionCleanupTimers = new Map();
+
+function rememberClosingSession(key) {
+    if (!key) return;
+    const timer = closedSessionCleanupTimers.get(key);
+    if (timer) {
+        clearTimeout(timer);
+        closedSessionCleanupTimers.delete(key);
+    }
+    closingSessionKeys.add(key);
+}
+
+function forgetClosingSession(key, delayMs = 0) {
+    if (!key) return;
+    const existingTimer = closedSessionCleanupTimers.get(key);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        closedSessionCleanupTimers.delete(key);
+    }
+    if (delayMs > 0) {
+        const timer = window.setTimeout(() => {
+            closingSessionKeys.delete(key);
+            closedSessionCleanupTimers.delete(key);
+        }, delayMs);
+        closedSessionCleanupTimers.set(key, timer);
+        return;
+    }
+    closingSessionKeys.delete(key);
+}
+
+function isSessionClosing(serverId, sessionId) {
+    return closingSessionKeys.has(makeSessionKey(serverId, sessionId));
+}
+
+function createSessionRestoreSnapshot(session) {
+    if (!session) return null;
+    return {
+        id: session.id,
+        createdAt: session.createdAt,
+        shell: session.shell,
+        initialCwd: session.initialCwd,
+        title: session.title,
+        cwd: session.cwd,
+        env: session.env,
+        cols: session.cols,
+        rows: session.rows,
+        managed: session.managed,
+        closed: session.closed,
+        exitStatus: session.exitStatus,
+        workspaceState: session.sharedWorkspaceState
+    };
+}
+
 if (typeof window !== 'undefined') {
     window.__tabminalSmoke = {
         async syncMainServerSessions() {
@@ -13821,6 +13875,7 @@ function shouldSyncManagedTerminalSession(server, nextSummary, _previous = null)
     if (!server || !nextSummary) return false;
     const nextSessionId = String(nextSummary.terminalSessionId || '').trim();
     if (!nextSessionId) return false;
+    if (isSessionClosing(server.id, nextSessionId)) return false;
     if (nextSummary.released) {
         return false;
     }
@@ -18380,6 +18435,7 @@ function updateSystemStatus(system, latency, server = getActiveServer()) {
 function upsertSession(server, data) {
     if (!server || !data?.id) return null;
     const key = makeSessionKey(server.id, data.id);
+    if (closingSessionKeys.has(key)) return null;
     let session = state.sessions.get(key) || null;
     let topologyChanged = false;
     if (session) {
@@ -18405,7 +18461,11 @@ function upsertSession(server, data) {
 }
 
 function reconcileSessions(server, remoteSessions) {
-    const remoteIds = new Set(remoteSessions.map(session => session.id));
+    const remoteIds = new Set(
+        remoteSessions
+            .filter((session) => !isSessionClosing(server.id, session.id))
+            .map(session => session.id)
+    );
     const localSessions = getSessionsForServer(server.id);
     const previousManagedSessionKeys = new Set(
         localSessions
@@ -18423,6 +18483,9 @@ function reconcileSessions(server, remoteSessions) {
 
     for (const data of remoteSessions) {
         const key = makeSessionKey(server.id, data.id);
+        if (closingSessionKeys.has(key)) {
+            continue;
+        }
         if (state.sessions.has(key)) {
             state.sessions.get(key).update(data);
         } else {
@@ -19608,34 +19671,60 @@ async function switchToSession(sessionKey, options = {}) {
 async function closeSession(sessionKey) {
     const session = state.sessions.get(sessionKey);
     if (!session) return;
-    try {
-        const mainServer = getMainServer();
-        const orderedKeys = Array.from(state.sessions.keys());
-        const currentIndex = orderedKeys.indexOf(sessionKey);
-        await session.server.fetch(`/api/sessions/${session.id}`, { method: 'DELETE' });
-        await syncServer(session.server);
-        
-        if (state.activeSessionKey === sessionKey) {
-            const keys = Array.from(state.sessions.keys());
-            let nextKey = null;
-            if (keys.length > 0) {
-                const fallbackIndex = Math.max(0, Math.min(currentIndex, keys.length - 1));
-                nextKey = keys[fallbackIndex];
-            }
+    const mainServer = getMainServer();
+    const server = session.server;
+    const sessionId = session.id;
+    const restoreSnapshot = createSessionRestoreSnapshot(session);
+    const orderedKeys = Array.from(state.sessions.keys());
+    const currentIndex = orderedKeys.indexOf(sessionKey);
+    const fallbackKeys = orderedKeys.filter((key) => key !== sessionKey);
+    const fallbackIndex = Math.max(
+        0,
+        Math.min(currentIndex, fallbackKeys.length - 1)
+    );
+    const nextKey = fallbackKeys[fallbackIndex] || null;
 
-            if (nextKey) {
-                switchToSession(nextKey);
-            } else {
-                state.activeSessionKey = null;
-                terminalEl.innerHTML = '';
-            }
+    rememberClosingSession(sessionKey);
+    removeSession(sessionKey);
+
+    if (state.activeSessionKey === sessionKey) {
+        if (nextKey && state.sessions.has(nextKey)) {
+            switchToSession(nextKey);
+        } else {
+            state.activeSessionKey = null;
+            terminalEl.innerHTML = '';
+            editorManager.switchTo(null);
         }
+    }
+    renderTabs();
+
+    try {
+        const response = await server.fetch(
+            `/api/sessions/${sessionId}`,
+            { method: 'DELETE' }
+        );
+        if (!response.ok) {
+            throw new Error(`Close session failed with HTTP ${response.status}`);
+        }
+        forgetClosingSession(sessionKey, 8000);
+        await syncServer(server);
 
         if (state.sessions.size === 0 && mainServer) {
             await createNewSession(mainServer);
         }
     } catch (error) {
+        forgetClosingSession(sessionKey);
         console.error('Failed to close session:', error);
+        if (restoreSnapshot && !state.sessions.has(sessionKey)) {
+            upsertSession(server, restoreSnapshot);
+            if (!state.activeSessionKey) {
+                await switchToSession(sessionKey);
+            }
+        }
+        alert('Failed to close terminal session.', {
+            type: 'error',
+            title: 'Terminal'
+        });
     }
 }
 
