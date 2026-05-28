@@ -8,7 +8,7 @@
 我们的需求变成了一个稳定的终端 + 简单的文件管理 + 简单的git管理
 
 ## 快速开始
-Dockerfile预装了claude code 和 claude-code-router，如果需要其他的，修改安装语句即可。
+npm 全局定义为 /home/coder/.npm-g 执行时无需sudo
 
 ```
 git clone https://github.com/ghostry/Tabminal

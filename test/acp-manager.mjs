@@ -480,6 +480,29 @@ describe('AcpManager', () => {
         }
     });
 
+    it('exposes Oh My Pi through its documented ACP command', async () => {
+        const manager = new AcpManager({
+            availabilityProbes: {
+                commandExists: (command) => command === 'omp',
+                hasGhCopilotWrapper: () => false,
+                hasGhCopilotCliInstalled: () => false,
+                probeCodexAuth: () => ({ available: true, reason: '' }),
+                probeGhAuth: () => ({ available: true, reason: '' })
+            }
+        });
+        try {
+            const omp = (await manager.listDefinitions()).find(
+                (definition) => definition.id === 'omp'
+            );
+            assert.ok(omp);
+            assert.strictEqual(omp.label, 'Oh My Pi');
+            assert.strictEqual(omp.commandLabel, 'omp acp');
+            assert.strictEqual(omp.available, true);
+        } finally {
+            await manager.dispose().catch(() => {});
+        }
+    });
+
     it('starts a new synthetic restore turn when replay reaches a new user prompt', () => {
         const capture = createRestoreCaptureState([]);
         const ingest = (role, text) => {

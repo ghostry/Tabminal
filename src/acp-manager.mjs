@@ -301,7 +301,8 @@ const DEFAULT_TRANSCRIPT_PERSIST_DELAY_MS = 250;
 const ALL_SESSION_AGENT_IDS = new Set([
     'claude',
     'codex',
-    'copilot'
+    'copilot',
+    'omp'
 ]);
 const TEXT_ATTACHMENT_EXTENSIONS = new Set([
     'txt', 'md', 'markdown', 'json', 'jsonl', 'yaml', 'yml', 'toml',
@@ -853,6 +854,15 @@ function makeBuiltInDefinitions() {
             setupCommandLabel: hasGhCopilot
                 ? 'gh copilot'
                 : 'Install GitHub Copilot CLI'
+        },
+        {
+            id: 'omp',
+            label: 'Oh My Pi',
+            description: 'Oh My Pi ACP server',
+            websiteUrl: 'https://github.com/ghostry/oh-my-pi',
+            command: 'omp',
+            args: ['acp'],
+            commandLabel: 'omp acp'
         }
     ];
     if (process.env.TABMINAL_ENABLE_TEST_AGENT === '1') {
