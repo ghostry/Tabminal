@@ -12163,6 +12163,13 @@ class Session {
         this.runningCommand = '';
 
         if (
+            isAgentManagedSession(this)
+            && this.lastExecutionEntry?.exitCode === 0
+            && isGitCommitCommand(this.lastExecutionEntry.command || '')
+        ) {
+            editorManager.requestSessionTabGitActionsRefresh(this, { force: true });
+        }
+        if (
             state.activeSessionKey !== this.key
             && !isAgentManagedSession(this)
         ) {
@@ -14475,6 +14482,13 @@ function isIgnoredTerminalExecutionCommand(command) {
     );
 }
 
+function isGitCommitCommand(command) {
+    if (typeof command !== 'string' || command.length === 0) {
+        return false;
+    }
+    return /(^|[;&|({\s])git\s+commit(\s|$)/.test(command);
+}
+
 function formatAgentAttachmentSize(size) {
     const value = Number(size);
     if (!Number.isFinite(value) || value <= 0) {
@@ -14762,6 +14776,10 @@ function normalizeManagedSessionMeta(managed) {
 
 function isAgentManagedSession(session) {
     return session?.managed?.kind === 'agent-terminal';
+}
+
+function shouldShowSessionInSidebar(session) {
+    return !isAgentManagedSession(session);
 }
 
 function getManagedSessionLabel(session) {
@@ -18632,16 +18650,18 @@ function renderTabs() {
 
     const newTabItem = document.getElementById('new-tab-item');
 
-    // Remove tabs that are no longer in state
+    // Remove tabs that are no longer visible in the sidebar.
     const tabElements = tabListEl.querySelectorAll('.tab-item');
     for (const el of tabElements) {
-        if (!state.sessions.has(el.dataset.sessionKey)) {
+        const session = state.sessions.get(el.dataset.sessionKey) || null;
+        if (!session || !shouldShowSessionInSidebar(session)) {
             el.remove();
         }
     }
 
     // Add or update tabs
     for (const [key, session] of state.sessions) {
+        if (!shouldShowSessionInSidebar(session)) continue;
         let tab = tabListEl.querySelector(`[data-session-key="${key}"]`);
         if (!tab) {
             tab = createTabElement(session);
