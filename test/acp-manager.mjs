@@ -503,6 +503,29 @@ describe('AcpManager', () => {
         }
     });
 
+    it('exposes opencode through its documented ACP command', async () => {
+        const manager = new AcpManager({
+            availabilityProbes: {
+                commandExists: (command) => command === 'opencode',
+                hasGhCopilotWrapper: () => false,
+                hasGhCopilotCliInstalled: () => false,
+                probeCodexAuth: () => ({ available: true, reason: '' }),
+                probeGhAuth: () => ({ available: true, reason: '' })
+            }
+        });
+        try {
+            const opencode = (await manager.listDefinitions()).find(
+                (definition) => definition.id === 'opencode'
+            );
+            assert.ok(opencode);
+            assert.strictEqual(opencode.label, 'opencode');
+            assert.strictEqual(opencode.commandLabel, 'opencode acp');
+            assert.strictEqual(opencode.available, true);
+        } finally {
+            await manager.dispose().catch(() => {});
+        }
+    });
+
     it('starts a new synthetic restore turn when replay reaches a new user prompt', () => {
         const capture = createRestoreCaptureState([]);
         const ingest = (role, text) => {

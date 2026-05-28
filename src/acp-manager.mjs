@@ -840,6 +840,15 @@ function makeBuiltInDefinitions() {
             commandLabel: 'npx @zed-industries/claude-code-acp@latest'
         },
         {
+            id: 'opencode',
+            label: 'opencode',
+            description: 'opencode ACP server',
+            websiteUrl: 'https://opencode.ai/docs/acp/',
+            command: 'opencode',
+            args: ['acp'],
+            commandLabel: 'opencode acp'
+        },
+        {
             id: 'copilot',
             label: 'GitHub Copilot',
             description: 'GitHub Copilot CLI ACP server',
