@@ -16698,6 +16698,11 @@ function getToolCallTextContentBlocks(toolCall) {
     return blocks;
 }
 
+function toolCallHasContentPlaceholder(toolCall) {
+    return Array.isArray(toolCall?.content)
+        && toolCall.content.some((item) => item?.type === 'content');
+}
+
 function normalizeAgentEditorPath(path) {
     const value = String(path || '').trim();
     if (!value) return '/snippet.txt';
@@ -16763,6 +16768,24 @@ function buildAgentStructuredContentSections(
                 path: diff.path,
                 oldText: diff.oldText || '',
                 newText: diff.newText || ''
+            }];
+        }
+        if (shouldLoadDetails && diffItems.length > 0) {
+            return [{
+                label: 'Diff',
+                preview: diffPreview || 'Load diff',
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId,
+                detailInclude: 'diff'
+            }];
+        }
+        if (shouldLoadDetails && toolCallHasContentPlaceholder(toolCall)) {
+            return [{
+                label: 'Content',
+                preview: diffPreview || 'Load content',
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId,
+                detailInclude: 'content'
             }];
         }
         if (shouldLoadDetails) {
