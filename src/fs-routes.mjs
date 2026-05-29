@@ -685,10 +685,14 @@ export const setupFsRoutes = (router) => {
                 { cwd: absPath, timeout: 5000 }
             );
             const repoRoot = revParse.stdout.trim();
-            const result = await execFileAsync('git', ['pull'], {
+            const result = await execFileAsync(
+                'git',
+                ['pull', '--no-rebase', '--no-edit'],
+                {
                 cwd: repoRoot,
                 timeout: 30000
-            });
+                }
+            );
             ctx.body = { success: true, output: (result.stdout + result.stderr).trim() };
         } catch (err) {
             const msg = (err.stderr || err.stdout || err.message || '').trim();

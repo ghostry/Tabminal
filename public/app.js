@@ -4603,7 +4603,6 @@ class EditorManager {
             return {
                 session,
                 renderToken: session.fileTreeRenderToken,
-                scrollTop: session.fileTreeElement?.scrollTop || 0,
                 allowPendingFocus: !!(
                     session.fileTreeElement
                     && document.activeElement
@@ -4649,10 +4648,11 @@ class EditorManager {
         );
 
         for (const plan of renderPlans) {
-            const { session, renderToken, scrollTop, allowPendingFocus } = plan;
+            const { session, renderToken, allowPendingFocus } = plan;
             if (!session.fileTreeElement) {
                 continue;
             }
+            const scrollTop = session.fileTreeElement.scrollTop || 0;
             this.renderTreeFromSnapshots(
                 session.cwd,
                 session.fileTreeElement,
@@ -6057,10 +6057,43 @@ class EditorManager {
         let longPressFired = false;
         let longPressStartX = 0;
         let longPressStartY = 0;
+        let longPressStartScrollTop = 0;
+        const longPressMoveThreshold = 8;
         const cancelLongPress = () => {
             if (longPressTimer) {
                 clearTimeout(longPressTimer);
                 longPressTimer = 0;
+            }
+            document.removeEventListener('touchmove', handleLongPressMove, true);
+            document.removeEventListener('touchend', handleLongPressEnd, true);
+            document.removeEventListener('touchcancel', cancelLongPress, true);
+            session.fileTreeElement?.removeEventListener(
+                'scroll',
+                handleLongPressScroll
+            );
+        };
+        const handleLongPressMove = (e) => {
+            const touch = e.touches[0];
+            if (!touch) return;
+            if (
+                Math.abs(touch.clientX - longPressStartX) > longPressMoveThreshold
+                || Math.abs(touch.clientY - longPressStartY) > longPressMoveThreshold
+            ) {
+                cancelLongPress();
+            }
+        };
+        const handleLongPressScroll = () => {
+            const nextScrollTop = session.fileTreeElement?.scrollTop || 0;
+            if (Math.abs(nextScrollTop - longPressStartScrollTop) > 1) {
+                cancelLongPress();
+            }
+        };
+        const handleLongPressEnd = (e) => {
+            cancelLongPress();
+            if (longPressFired) {
+                e.preventDefault();
+                e.stopPropagation();
+                longPressFired = false;
             }
         };
         row.ontouchstart = (e) => {
@@ -6075,10 +6108,20 @@ class EditorManager {
             const touch = e.touches[0];
             longPressStartX = touch?.clientX || 0;
             longPressStartY = touch?.clientY || 0;
+            longPressStartScrollTop = session.fileTreeElement?.scrollTop || 0;
             cancelLongPress();
+            document.addEventListener('touchmove', handleLongPressMove, true);
+            document.addEventListener('touchend', handleLongPressEnd, true);
+            document.addEventListener('touchcancel', cancelLongPress, true);
+            session.fileTreeElement?.addEventListener(
+                'scroll',
+                handleLongPressScroll,
+                { passive: true }
+            );
             longPressTimer = window.setTimeout(() => {
                 longPressTimer = 0;
                 longPressFired = true;
+                cancelLongPress();
                 this.setSelectedTreePath(session, file.path, {
                     preserveFocus: true
                 });
@@ -6090,24 +6133,8 @@ class EditorManager {
                 );
             }, 500);
         };
-        row.ontouchmove = (e) => {
-            const touch = e.touches[0];
-            if (!touch) return;
-            if (
-                Math.abs(touch.clientX - longPressStartX) > 8
-                || Math.abs(touch.clientY - longPressStartY) > 8
-            ) {
-                cancelLongPress();
-            }
-        };
-        row.ontouchend = (e) => {
-            cancelLongPress();
-            if (longPressFired) {
-                e.preventDefault();
-                e.stopPropagation();
-                longPressFired = false;
-            }
-        };
+        row.ontouchmove = handleLongPressMove;
+        row.ontouchend = handleLongPressEnd;
         row.ontouchcancel = cancelLongPress;
 
         row.onmousedown = (event) => {
@@ -12304,9 +12331,8 @@ class Session {
         this.runningCommand = '';
 
         if (
-            isAgentManagedSession(this)
-            && this.lastExecutionEntry?.exitCode === 0
-            && isGitCommitCommand(this.lastExecutionEntry.command || '')
+            this.lastExecutionEntry?.exitCode === 0
+            && isGitRemoteStateCommand(this.lastExecutionEntry.command || '')
         ) {
             editorManager.requestSessionTabGitActionsRefresh(this, { force: true });
         }
@@ -12622,6 +12648,7 @@ class AgentTab {
         this.resumeSessionsLoadedAt = 0;
         this.resumeSessionsPromise = null;
         this.connectPromise = null;
+        this.gitCommitRefreshToolIds = new Set();
         this.update(data);
         this.connect();
     }
@@ -13559,12 +13586,16 @@ class AgentTab {
                         update,
                         previous?.order
                     );
-                    this.toolCalls.set(
-                        update.toolCallId,
+                    const mergedToolCall = (
                         nextToolCall.detailsAvailable && !previous?.detailsLoaded
                             ? nextToolCall
                             : { ...previous, ...nextToolCall }
                     );
+                    this.toolCalls.set(
+                        update.toolCallId,
+                        mergedToolCall
+                    );
+                    this.#refreshGitActionsAfterAgentCommit(mergedToolCall);
                 }
                 return {
                     full: false,
@@ -13578,12 +13609,14 @@ class AgentTab {
                     update,
                     previous.order
                 );
-                this.toolCalls.set(update.toolCallId, {
+                const mergedToolCall = {
                     ...(nextToolCall.detailsAvailable && !previous.detailsLoaded
                         ? {}
                         : previous),
                     ...nextToolCall
-                });
+                };
+                this.toolCalls.set(update.toolCallId, mergedToolCall);
+                this.#refreshGitActionsAfterAgentCommit(mergedToolCall);
                 return {
                     full: false,
                     delayMs: AGENT_TRANSCRIPT_RENDER_DEBOUNCE_MS,
@@ -13629,6 +13662,18 @@ class AgentTab {
             default:
                 return { full: true };
         }
+    }
+
+    #refreshGitActionsAfterAgentCommit(toolCall) {
+        if (!toolCall?.toolCallId) return;
+        if (this.gitCommitRefreshToolIds.has(toolCall.toolCallId)) return;
+        if (!isSuccessfulAgentGitCommitTool(toolCall, this)) return;
+        this.gitCommitRefreshToolIds.add(toolCall.toolCallId);
+        const session = this.getLinkedSession();
+        if (!session) return;
+        editorManager.requestSessionTabGitActionsRefresh(session, {
+            force: true
+        });
     }
 
     async sendPrompt(text, attachments = []) {
@@ -14228,6 +14273,45 @@ function syncSessionTabMinimumHeight(tabElement) {
     return overlayMinHeight;
 }
 
+function bindNestedVerticalScroll(child, parent) {
+    if (!child || !parent) return;
+
+    let lastTouchY = 0;
+    child.addEventListener('touchstart', (event) => {
+        lastTouchY = event.touches[0]?.clientY || 0;
+    }, { passive: true });
+
+    child.addEventListener('touchmove', (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+
+        const nextTouchY = touch.clientY;
+        const deltaY = lastTouchY - nextTouchY;
+        lastTouchY = nextTouchY;
+        if (deltaY === 0) return;
+
+        const childMaxScroll = Math.max(0, child.scrollHeight - child.clientHeight);
+        const parentMaxScroll = Math.max(0, parent.scrollHeight - parent.clientHeight);
+        if (parentMaxScroll <= 0) return;
+
+        const childAtTop = child.scrollTop <= 0;
+        const childAtBottom = child.scrollTop >= childMaxScroll - 1;
+        const parentCanScrollUp = parent.scrollTop > 0;
+        const parentCanScrollDown = parent.scrollTop < parentMaxScroll - 1;
+        const shouldRelayUp = deltaY < 0 && childAtTop && parentCanScrollUp;
+        const shouldRelayDown = deltaY > 0 && childAtBottom && parentCanScrollDown;
+        if (!shouldRelayUp && !shouldRelayDown) return;
+
+        parent.scrollTop = Math.max(
+            0,
+            Math.min(parentMaxScroll, parent.scrollTop + deltaY)
+        );
+        if (event.cancelable) {
+            event.preventDefault();
+        }
+    }, { passive: false });
+}
+
 function getAgentTabIndicatorState(agentTab) {
     if (!agentTab) return 'idle';
     if (agentTabHasRunningActivity(agentTab)) return 'running';
@@ -14642,10 +14726,92 @@ function isIgnoredTerminalExecutionCommand(command) {
 }
 
 function isGitCommitCommand(command) {
+    return isGitSubcommand(command, 'commit');
+}
+
+function isGitPushCommand(command) {
+    return isGitSubcommand(command, 'push');
+}
+
+function isGitPullCommand(command) {
+    return isGitSubcommand(command, 'pull');
+}
+
+function isGitRemoteStateCommand(command) {
+    return isGitCommitCommand(command)
+        || isGitPushCommand(command)
+        || isGitPullCommand(command);
+}
+
+function isGitSubcommand(command, subcommand) {
     if (typeof command !== 'string' || command.length === 0) {
         return false;
     }
-    return /(^|[;&|({\s])git\s+commit(\s|$)/.test(command);
+    const escapedSubcommand = subcommand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const gitCommandPattern = new RegExp(
+        `(^|[;&|({\\s])git(?:\\s+(?:-[A-Za-z](?:\\s+\\S+)?|--[^\\s=]+(?:=\\S+)?))*\\s+${escapedSubcommand}(\\s|$)`
+    );
+    return gitCommandPattern.test(command);
+}
+
+function getAgentToolCommandTexts(toolCall, agentTab = null) {
+    const commands = [];
+    const rawInput = toolCall?.rawInput || null;
+    if (typeof rawInput?.cmd === 'string' && rawInput.cmd) {
+        commands.push(rawInput.cmd);
+    }
+    if (typeof rawInput?.command === 'string' && rawInput.command) {
+        commands.push(rawInput.command);
+    }
+    if (Array.isArray(rawInput?.command) && rawInput.command.length > 0) {
+        commands.push(rawInput.command.join(' '));
+    }
+    if (typeof rawInput?.chars === 'string' && rawInput.chars.trim()) {
+        commands.push(rawInput.chars.trim());
+    }
+    for (const terminalId of getAgentToolTerminalIds(toolCall)) {
+        const terminal = resolveAgentTerminalSummary(
+            agentTab?.terminals,
+            terminalId
+        );
+        if (typeof terminal?.command === 'string' && terminal.command) {
+            commands.push(terminal.command);
+        }
+    }
+    return Array.from(new Set(commands));
+}
+
+function getAgentToolExitCode(toolCall, agentTab = null) {
+    const output = toolCall?.rawOutput;
+    if (output && typeof output === 'object') {
+        if (Number.isFinite(output.exit_code)) return output.exit_code;
+        if (Number.isFinite(output.exitCode)) return output.exitCode;
+    }
+    if (Number.isFinite(toolCall?.exitCode)) return toolCall.exitCode;
+    for (const terminalId of getAgentToolTerminalIds(toolCall)) {
+        const terminal = resolveAgentTerminalSummary(
+            agentTab?.terminals,
+            terminalId
+        );
+        if (Number.isFinite(terminal?.exitStatus?.exitCode)) {
+            return terminal.exitStatus.exitCode;
+        }
+    }
+    return null;
+}
+
+function isSuccessfulAgentGitCommitTool(toolCall, agentTab = null) {
+    if (!toolCall || typeof toolCall !== 'object') return false;
+    const commands = getAgentToolCommandTexts(toolCall, agentTab);
+    if (!commands.some((command) => isGitCommitCommand(command))) {
+        return false;
+    }
+    const exitCode = getAgentToolExitCode(toolCall, agentTab);
+    if (Number.isFinite(exitCode) && exitCode !== 0) {
+        return false;
+    }
+    const statusClass = getEffectiveAgentToolStatus(toolCall, agentTab);
+    return statusClass === 'completed' || statusClass === 'ready';
 }
 
 function formatAgentAttachmentSize(size) {
@@ -19075,6 +19241,7 @@ function createTabElement(session) {
         event.preventDefault();
         event.stopPropagation();
     });
+    bindNestedVerticalScroll(fileTree, tabListEl);
     
     if (session.editorState && session.editorState.isVisible) {
         editorManager.refreshSessionTree(session);
