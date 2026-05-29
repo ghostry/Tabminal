@@ -251,6 +251,13 @@ body {
     /* border-bottom removed, moved to virtual-keys */
 }
 
+body.soft-keyboard-open .app-layout {
+    margin-bottom: calc(
+        var(--soft-keyboard-height, 0px)
+        + var(--soft-keyboard-terminal-clearance, 36px)
+    );
+}
+
 .sidebar {
     display: flex;
     flex-direction: column;
@@ -1084,6 +1091,10 @@ body {
     flex-direction: column;
     gap: 4px;
     z-index: 100;
+}
+
+body.soft-keyboard-open .soft-keyboard {
+    display: flex;
 }
 
 .soft-keyboard .row {

@@ -20772,6 +20772,49 @@ const softKeyboard = document.getElementById('soft-keyboard');
 
 if (modCtrl && modAlt && modShift && modSym && softKeyboard) {
     const modifiers = { ctrl: false, alt: false, shift: false, sym: false };
+    let softKeyboardLayoutFrame = 0;
+
+    const fitActiveTerminalForSoftKeyboard = () => {
+        const session = getActiveSession();
+        if (!session) return;
+        session.fitMainTerminalIfVisible();
+        session.reportResize();
+    };
+
+    const getTerminalSoftKeyboardClearance = () => {
+        const viewportWidth = window.visualViewport?.width || window.innerWidth;
+        const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        if (viewportWidth > viewportHeight) {
+            return 0;
+        }
+        const row = terminalEl?.querySelector('.xterm-rows > div');
+        const rowHeight = row?.getBoundingClientRect?.().height || 18;
+        return Math.ceil(rowHeight * 2);
+    };
+
+    const syncSoftKeyboardLayout = (isVisible) => {
+        document.body.classList.toggle('soft-keyboard-open', isVisible);
+        softKeyboard.style.display = isVisible ? 'flex' : 'none';
+
+        if (softKeyboardLayoutFrame) {
+            cancelAnimationFrame(softKeyboardLayoutFrame);
+        }
+        softKeyboardLayoutFrame = requestAnimationFrame(() => {
+            softKeyboardLayoutFrame = 0;
+            const height = isVisible
+                ? Math.ceil(softKeyboard.getBoundingClientRect().height)
+                : 0;
+            document.documentElement.style.setProperty(
+                '--soft-keyboard-height',
+                `${height}px`
+            );
+            document.documentElement.style.setProperty(
+                '--soft-keyboard-terminal-clearance',
+                `${isVisible ? getTerminalSoftKeyboardClearance() : 0}px`
+            );
+            requestAnimationFrame(fitActiveTerminalForSoftKeyboard);
+        });
+    };
 
     const bindPress = (element, handler) => {
         if (!element) return;
@@ -20827,9 +20870,20 @@ if (modCtrl && modAlt && modShift && modSym && softKeyboard) {
         // Visual Flip: Shift only if Ctrl is not active (to avoid confusion)
         const isVisualShift = modifiers.shift && !modifiers.ctrl;
         softKeyboard.classList.toggle('shift-mode', isVisualShift);
-        
-        softKeyboard.style.display = anyActive ? 'flex' : 'none';
+
+        syncSoftKeyboardLayout(anyActive);
     };
+
+    const syncOpenSoftKeyboardLayout = () => {
+        if (document.body.classList.contains('soft-keyboard-open')) {
+            syncSoftKeyboardLayout(true);
+        }
+    };
+
+    window.addEventListener('resize', syncOpenSoftKeyboardLayout);
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', syncOpenSoftKeyboardLayout);
+    }
 
     const toggleMod = (name) => {
         modifiers[name] = !modifiers[name];
