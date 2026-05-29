@@ -3227,9 +3227,12 @@ class AcpRuntime extends EventEmitter {
             return this.serializeTabWindow(tab);
         } catch (error) {
             tab.restoreCapture = null;
-            this.tabs.delete(tab.id);
-            this.sessionToTabId.delete(tab.acpSessionId);
-            throw error;
+            this.#restoreSerializedTab(tab, meta);
+            tab.status = 'error';
+            tab.busy = false;
+            tab.errorMessage = error?.message || 'Failed to restore agent session';
+            this.#markTabDirty(tab);
+            return this.serializeTabWindow(tab);
         }
     }
 
@@ -5241,6 +5244,9 @@ export class AcpManager extends EventEmitter {
         const includeSet = new Set(include.split(',').map((item) => item.trim()));
         const nextToolCall = wantsAll ? toolCall : {
             ...compactToolCall(toolCall),
+            ...(includeSet.has('input')
+                ? { rawInput: cloneSerializable(toolCall.rawInput, {}) }
+                : {}),
             content: Array.isArray(toolCall.content)
                 ? toolCall.content.filter((item) => (
                     (includeSet.has('terminal') && item?.type === 'terminal')
@@ -5281,6 +5287,9 @@ export class AcpManager extends EventEmitter {
             ...compactPermission(permission),
             toolCall: {
                 ...compactToolCall(fullToolCall),
+                ...(includeSet.has('input')
+                    ? { rawInput: cloneSerializable(fullToolCall.rawInput, {}) }
+                    : {}),
                 content: Array.isArray(fullToolCall.content)
                     ? fullToolCall.content.filter((item) => (
                         (includeSet.has('terminal') && item?.type === 'terminal')

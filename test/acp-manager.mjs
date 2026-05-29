@@ -1906,6 +1906,49 @@ describe('AcpManager', () => {
         assert.equal(delta.tabs[0].timelineWindow.total, 20);
     });
 
+    it('loads full tool input details after compact timeline state', async () => {
+        const { manager } = createManager();
+        const tab = await manager.createTab({
+            agentId: 'codex',
+            cwd: '/tmp/project',
+            terminalSessionId: 'term-1'
+        });
+        const runtimeEntry = manager.runtimes.values().next().value;
+        const runtimeTab = runtimeEntry.runtime.tabs.get(tab.id);
+        const longCommand = [
+            'ssh -o BatchMode=yes -o ConnectTimeout=8 root@10.1.5.110',
+            '\'set -eu; for p in /data/models/kimi-k2.6',
+            '/data/vllm/logs/download-kimi-k2.6.log',
+            '/data/vllm/state/downloads/status-kimi-k2.6.json',
+            '/data/modelscope_cache/moonshotai/Kimi-K2.6; do',
+            '[ -e "$p" ] && printf "%s\\n" "$p"; done\''
+        ].join(' ');
+        runtimeTab.toolCalls = [{
+            toolCallId: 'long-input-tool',
+            title: 'exec_command',
+            kind: 'execute',
+            status: 'completed',
+            rawInput: { cmd: longCommand },
+            order: 1
+        }];
+
+        const state = await manager.listState({ full: true });
+        const compactTool = state.tabs[0].toolCalls[0];
+        assert.equal(compactTool.rawInput.compacted, true);
+        assert.ok(compactTool.rawInput.cmd.length < longCommand.length);
+
+        const detail = manager.getTabToolDetail(
+            tab.id,
+            'long-input-tool',
+            { include: 'input' }
+        );
+
+        assert.equal(detail.complete, false);
+        assert.equal(detail.toolCall.rawInput.compacted, undefined);
+        assert.equal(detail.toolCall.rawInput.cmd, longCommand);
+        assert.equal(detail.toolCall.rawOutput, undefined);
+    });
+
     it('creates tabs with an initial mode when requested', async () => {
         const { manager } = createManager();
         const tab = await manager.createTab({
@@ -3064,6 +3107,19 @@ describe('AcpManager', () => {
             assert.equal(diffDetail.toolCall.content.every((item) =>
                 item.type === 'diff'
             ), true);
+            const inputDetail = manager.getTabToolDetail(
+                tab.id,
+                terminalTool?.toolCallId,
+                { include: 'input' }
+            );
+            assert.equal(inputDetail.complete, false);
+            assert.equal(inputDetail.toolCall.rawInput.compacted, undefined);
+            assert.equal(
+                inputDetail.toolCall.rawInput.path,
+                '/tmp/sample.js'
+            );
+            assert.equal(inputDetail.toolCall.rawOutput, undefined);
+            assert.equal(inputDetail.terminals.length, 0);
             const toolEvents = events.filter((event) => (
                 event.type === 'session_update'
                 && (

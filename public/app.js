@@ -9049,8 +9049,7 @@ class EditorManager {
         const sections = buildAgentToolSections(
             toolCall,
             summaryText,
-            agentTab.terminals,
-            { includeInputSection: false }
+            agentTab.terminals
         );
         const hasDiffSection = sections.some((section) =>
             section.label === 'Diff'
@@ -9064,14 +9063,23 @@ class EditorManager {
         if (
             toolCall.detailsAvailable
             && !toolCall.detailsLoaded
-            && sections.length === 0
+            && !sections.some((section) => (
+                section.label === 'Output'
+                || section.kind === 'tool-detail-loader'
+            ))
         ) {
-            sections.unshift({
+            const outputLoaderSection = {
                 label: 'Output',
                 preview: 'Load output',
                 kind: 'tool-detail-loader',
                 toolCallId: toolCall.toolCallId
-            });
+            };
+            const inputIndex = sections.findIndex(
+                (section) => section.label === 'Input'
+            );
+            sections.splice(inputIndex === -1 ? 0 : inputIndex + 1, 0,
+                outputLoaderSection
+            );
         }
         if (sections.length > 0) {
             const sectionContainer = document.createElement('div');
@@ -9169,12 +9177,18 @@ class EditorManager {
             agentTab.terminals
         );
         if (permission.detailsAvailable && !permission.detailsLoaded) {
-            sections.unshift({
+            const outputLoaderSection = {
                 label: 'Output',
                 preview: 'Load output',
                 kind: 'permission-detail-loader',
                 permissionId: permission.id
-            });
+            };
+            const inputIndex = sections.findIndex(
+                (section) => section.label === 'Input'
+            );
+            sections.splice(inputIndex === -1 ? 0 : inputIndex + 1, 0,
+                outputLoaderSection
+            );
         }
         if (sections.length > 0) {
             const sectionContainer = document.createElement('div');
@@ -9382,6 +9396,13 @@ class EditorManager {
                 && section.kind === 'terminal'
             ) || null;
         }
+        if (include === 'input') {
+            return sections.find((section) =>
+                section?.label === 'Input'
+                && section.kind !== 'tool-detail-loader'
+                && section.kind !== 'permission-detail-loader'
+            ) || null;
+        }
         if (include === 'content') {
             return sections.find((section) =>
                 section?.label === 'Content'
@@ -9466,7 +9487,7 @@ class EditorManager {
                     renderToolCall,
                     summaryText,
                     agentTab.terminals,
-                    { includeInputSection: false }
+                    { includeInputSection: include === 'input' }
                 ),
                 loaderSection
             );
@@ -9516,10 +9537,12 @@ class EditorManager {
             : normalizeStatusClass(toolLike?.status || statusSource?.status);
         const pending = statusClass === 'pending' || statusClass === 'running';
         if (pending) {
+            if (include === 'input') return 'Input is not available yet.';
             if (include === 'diff') return 'Diff is not available yet.';
             if (include === 'content') return 'Content is not available yet.';
             return 'Output is not available yet.';
         }
+        if (include === 'input') return 'No input.';
         if (include === 'diff') return 'No diff output.';
         if (include === 'content') return 'No content output.';
         return 'No output.';
@@ -12718,7 +12741,14 @@ class AgentTab {
         const existing = this.toolCalls.get(id);
         const include = String(options.include || '').trim();
         if (!include && existing?.detailsLoaded) return existing;
-        if (include && existing?.loadedDetailTypes?.includes(include)) return existing;
+        const hasLoadedDetailType = existing?.loadedDetailTypes?.includes(include);
+        if (
+            include
+            && hasLoadedDetailType
+            && !(include === 'input' && existing?.rawInput?.compacted === true)
+        ) {
+            return existing;
+        }
         const params = new URLSearchParams();
         if (include) {
             params.set('include', include);
@@ -12754,7 +12784,11 @@ class AgentTab {
                 && statusClass !== 'running'
             );
             const loadedTypes = previous.loadedDetailTypes || [];
-            const nextLoadedTypes = include && !loadedTypes.includes(include)
+            const hasFullInputDetail = include !== 'input'
+                || normalizedDetail.rawInput?.compacted !== true;
+            const nextLoadedTypes = include
+                && hasFullInputDetail
+                && !loadedTypes.includes(include)
                 ? [...loadedTypes, include]
                 : loadedTypes;
             const next = complete
@@ -16240,6 +16274,13 @@ function compactAgentSummaryText(text, limit = 180) {
         : value;
 }
 
+function isAgentInputSummaryCompressed(text, limit = 180) {
+    const value = String(text || '').trim();
+    if (!value) return false;
+    const singleLine = value.replace(/\s+/g, ' ');
+    return singleLine.length > limit || /[\r\n]/.test(value);
+}
+
 function normalizeAgentComparableText(text) {
     return String(text || '')
         .replace(/\s+/g, ' ')
@@ -16987,17 +17028,33 @@ function buildAgentToolSections(
     const rawInput = summarizeAgentRawInput(toolCall?.rawInput);
     const normalizedTitle = normalizeAgentComparableText(title);
     const normalizedInput = normalizeAgentComparableText(rawInput);
-    if (
-        options.includeInputSection !== false
-        && rawInput
+    const shouldShowInputSection = rawInput
         && normalizedInput
         && normalizedInput !== normalizedTitle
+        && isAgentInputSummaryCompressed(rawInput);
+    if (
+        options.includeInputSection !== false
+        && shouldShowInputSection
     ) {
-        sections.push({
-            label: 'Input',
-            text: truncateAgentDetail(rawInput),
-            kind: 'text'
-        });
+        if (
+            toolCall?.rawInput?.compacted === true
+            && toolCall?.detailsAvailable
+            && !toolCall?.detailsLoaded
+        ) {
+            sections.push({
+                label: 'Input',
+                preview: buildAgentSectionSummaryPreview(rawInput),
+                kind: 'tool-detail-loader',
+                toolCallId: toolCall.toolCallId,
+                detailInclude: 'input'
+            });
+        } else {
+            sections.push({
+                label: 'Input',
+                text: rawInput,
+                kind: 'text'
+            });
+        }
     }
     sections.push(
         ...buildAgentStructuredContentSections(
