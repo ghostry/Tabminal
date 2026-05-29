@@ -106,6 +106,12 @@ const agentSetupGoogleKey = document.getElementById('agent-setup-google-key');
 const agentSetupGeminiNote = document.getElementById('agent-setup-gemini-note');
 const agentSetupClaude = document.getElementById('agent-setup-claude');
 const agentSetupClaudeKey = document.getElementById('agent-setup-claude-key');
+const agentSetupClaudeBaseUrl = document.getElementById(
+    'agent-setup-claude-base-url'
+);
+const agentSetupClaudeAuthToken = document.getElementById(
+    'agent-setup-claude-auth-token'
+);
 const agentSetupClaudeUseVertex = document.getElementById(
     'agent-setup-claude-use-vertex'
 );
@@ -7384,247 +7390,302 @@ class EditorManager {
         return tabs;
     }
 
+    getEditorTabElement(tabInfo) {
+        if (!tabInfo?.key) return null;
+        const tab = this.tabsContainer.querySelector(
+            `.editor-tab[data-editor-tab-key="${CSS.escape(tabInfo.key)}"]`
+        );
+        if (!tab || tab.dataset.editorTabKind !== tabInfo.kind) {
+            tab?.remove();
+            return null;
+        }
+        return tab;
+    }
+
+    createEditorTabElement(tabInfo) {
+        const tab = document.createElement('div');
+        tab.dataset.editorTabKey = tabInfo.key;
+        tab.dataset.editorTabKind = tabInfo.kind;
+        if (tabInfo.kind === 'terminal') {
+            tab.onclick = () => this.activateTerminalTab();
+            bindSingleTapActivation(tab, () => this.activateTerminalTab());
+        } else if (tabInfo.kind === 'file') {
+            tab.onclick = () => this.activateFileTab(tabInfo.path);
+            bindSingleTapActivation(
+                tab,
+                () => this.activateFileTab(tabInfo.path),
+                { ignoreSelector: '.close-btn, .tab-action-btn' }
+            );
+        } else if (tabInfo.kind === 'preview') {
+            tab.onclick = () => this.activateMarkdownPreviewTab(tabInfo.path);
+            bindSingleTapActivation(
+                tab,
+                () => this.activateMarkdownPreviewTab(tabInfo.path),
+                { ignoreSelector: '.tab-action-btn' }
+            );
+        } else if (tabInfo.kind === 'agent') {
+            tab.onclick = () => this.activateAgentTab(tabInfo.key);
+            bindSingleTapActivation(
+                tab,
+                () => this.activateAgentTab(tabInfo.key),
+                { ignoreSelector: '.close-btn' }
+            );
+        }
+        return tab;
+    }
+
+    syncTerminalEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
+        tab.className = 'editor-tab terminal-editor-tab';
+        tab.classList.toggle(
+            'active',
+            tabInfo.key === activeWorkspaceTabKey
+        );
+        if (tab.dataset.renderSignature !== 'terminal') {
+            const icon = document.createElement('span');
+            icon.className = 'agent-editor-tab-icon';
+            icon.dataset.role = 'icon';
+
+            const label = document.createElement('span');
+            label.dataset.role = 'label';
+            label.textContent = 'Terminal';
+
+            tab.replaceChildren(icon, label);
+            tab.dataset.renderSignature = 'terminal';
+        }
+        applyStatusIconState(
+            tab.querySelector('[data-role="icon"]'),
+            TERMINAL_TAB_ICON_SVG,
+            getSessionTerminalIndicatorState(this.currentSession)
+        );
+    }
+
+    syncFileEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
+        const path = tabInfo.path;
+        const name = path.split('/').pop();
+        const splitEnabled = !!tabInfo.splitEnabled;
+        const fileModel = this.getModel(path);
+        const pendingWrite = this.getPendingFileWrite(this.currentSession, path);
+        const hasPendingWrite = !!(pendingWrite && pendingWrite.content !== undefined);
+        const hasConflict = !!fileModel?.pendingRemoteConflict;
+        const supportedMarkdown = isSupportedMarkdownPath(path);
+        const active = tabInfo.key === activeWorkspaceTabKey
+            || (
+                splitEnabled
+                && makeMarkdownPreviewWorkspaceTabKey(path) === activeWorkspaceTabKey
+            );
+
+        tab.className = 'editor-tab';
+        tab.classList.toggle('active', active);
+        tab.classList.toggle('bound-tab', supportedMarkdown);
+        tab.classList.toggle('bound-tab-primary', supportedMarkdown);
+        tab.classList.toggle('is-split', splitEnabled);
+        tab.classList.toggle('readonly', !!fileModel?.readonly);
+        tab.classList.toggle('remote-conflict', hasConflict);
+        tab.title = hasConflict
+            ? 'Remote change could not be merged automatically.'
+            : '';
+
+        const signature = JSON.stringify({
+            kind: tabInfo.kind,
+            path,
+            name,
+            splitEnabled,
+            hasPendingWrite,
+            hasConflict,
+            icon: this.getIcon(name, false, false)
+        });
+        if (tab.dataset.renderSignature === signature) {
+            return;
+        }
+
+        const children = [];
+        if (hasConflict) {
+            const conflictMark = document.createElement('span');
+            conflictMark.className = 'remote-conflict-mark';
+            conflictMark.textContent = '!';
+            children.push(conflictMark);
+        }
+        if (hasPendingWrite) {
+            const unsavedStar = document.createElement('span');
+            unsavedStar.className = 'unsaved-star';
+            unsavedStar.textContent = '* ';
+            children.push(unsavedStar);
+        }
+
+        const icon = document.createElement('span');
+        icon.className = 'file-editor-tab-icon';
+        icon.innerHTML = this.getIcon(name, false, false);
+        children.push(icon);
+
+        const label = document.createElement('span');
+        label.textContent = name;
+        children.push(label);
+
+        if (splitEnabled) {
+            const unsplitBtn = document.createElement('span');
+            unsplitBtn.className = 'tab-action-btn markdown-unsplit-btn';
+            unsplitBtn.innerHTML = MARKDOWN_SPLIT_DISABLE_ICON_SVG;
+            unsplitBtn.title = 'Restore tabbed markdown view';
+            unsplitBtn.onclick = (event) => {
+                event.stopPropagation();
+                this.setMarkdownSplitView(path, false, this.currentSession);
+                this.activateFileTab(path, false, { focusEditor: false });
+            };
+            children.push(unsplitBtn);
+        }
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'close-btn';
+        closeBtn.innerHTML = CLOSE_ICON_SVG;
+        closeBtn.title = 'Close';
+        closeBtn.setAttribute('aria-label', `Close ${name}`);
+        bindTabChildAction(closeBtn, () => {
+            this.closeFile(path);
+        });
+        children.push(closeBtn);
+
+        tab.replaceChildren(...children);
+        tab.dataset.renderSignature = signature;
+    }
+
+    syncPreviewEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
+        const path = tabInfo.path;
+        const splitPath = this.getMarkdownSplitPath(this.currentSession);
+        const splittable = path !== splitPath && canUseMarkdownSplitTabsMode();
+        tab.className = 'editor-tab markdown-preview-tab bound-tab bound-tab-secondary';
+        tab.classList.toggle('active', tabInfo.key === activeWorkspaceTabKey);
+
+        const signature = JSON.stringify({
+            kind: tabInfo.kind,
+            path,
+            splittable
+        });
+        if (tab.dataset.renderSignature === signature) {
+            return;
+        }
+
+        const children = [];
+        if (splittable) {
+            const splitBtn = document.createElement('span');
+            splitBtn.className = 'tab-action-btn markdown-split-btn';
+            splitBtn.innerHTML = MARKDOWN_SPLIT_ENABLE_ICON_SVG;
+            splitBtn.title = 'Show markdown editor and preview side by side';
+            splitBtn.onclick = (event) => {
+                event.stopPropagation();
+                this.setMarkdownSplitView(path, true, this.currentSession);
+            };
+            children.push(splitBtn);
+        }
+
+        const previewIcon = document.createElement('span');
+        previewIcon.className = 'file-editor-tab-icon';
+        previewIcon.innerHTML = MARKDOWN_PREVIEW_ICON_SVG;
+        children.push(previewIcon);
+
+        const previewLabel = document.createElement('span');
+        previewLabel.textContent = 'Preview';
+        children.push(previewLabel);
+
+        tab.replaceChildren(...children);
+        tab.dataset.renderSignature = signature;
+    }
+
+    syncAgentEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
+        const agentTab = tabInfo.agentTab;
+        const labelText = formatWorkspaceTabTitle(
+            getAgentDisplayLabel(agentTab)
+        );
+        const titleText = String(getAgentDisplayLabel(agentTab) || '').trim();
+        tab.className = 'editor-tab agent-editor-tab';
+        tab.classList.toggle('active', tabInfo.key === activeWorkspaceTabKey);
+        tab.title = titleText;
+
+        if (tab.dataset.renderSignature !== 'agent') {
+            const icon = document.createElement('span');
+            icon.className = 'agent-editor-tab-icon';
+            icon.dataset.role = 'icon';
+
+            const label = document.createElement('span');
+            label.dataset.role = 'label';
+
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'close-btn';
+            closeBtn.innerHTML = CLOSE_ICON_SVG;
+            closeBtn.title = 'Close';
+            bindTabChildAction(closeBtn, () => {
+                void this.closeAgentTab(tabInfo.key);
+            });
+
+            tab.replaceChildren(icon, label, closeBtn);
+            tab.dataset.renderSignature = 'agent';
+        }
+
+        const label = tab.querySelector('[data-role="label"]');
+        if (label) {
+            label.textContent = labelText;
+        }
+        const closeBtn = tab.querySelector('.close-btn');
+        if (closeBtn) {
+            closeBtn.setAttribute(
+                'aria-label',
+                `Close ${getAgentDisplayLabel(agentTab) || 'agent tab'}`
+            );
+        }
+        applyStatusIconState(
+            tab.querySelector('[data-role="icon"]'),
+            AGENT_ICON_SVG,
+            getAgentTabIndicatorState(agentTab)
+        );
+    }
+
+    syncEditorTabElement(tab, tabInfo, activeWorkspaceTabKey) {
+        if (tabInfo.kind === 'terminal') {
+            this.syncTerminalEditorTab(tab, tabInfo, activeWorkspaceTabKey);
+        } else if (tabInfo.kind === 'file') {
+            this.syncFileEditorTab(tab, tabInfo, activeWorkspaceTabKey);
+        } else if (tabInfo.kind === 'preview') {
+            this.syncPreviewEditorTab(tab, tabInfo, activeWorkspaceTabKey);
+        } else if (tabInfo.kind === 'agent') {
+            this.syncAgentEditorTab(tab, tabInfo, activeWorkspaceTabKey);
+        }
+    }
+
     renderEditorTabs() {
         if (!this.currentSession) return;
         this.syncMarkdownSplitSupport(this.currentSession);
-        const state = this.currentSession.editorState;
         const activeWorkspaceTabKey = this.getActiveWorkspaceTabKey();
-        const splitPath = this.getMarkdownSplitPath(this.currentSession);
         this.editorTabs = this.collectEditorTabs();
 
-        this.tabsContainer.innerHTML = '';
         this.closeEditorTabListPopover();
         const useNav = this.editorTabs.length > 2;
         this.tabsPrevBtn.style.display = useNav ? 'inline-flex' : 'none';
         this.tabsNextBtn.style.display = useNav ? 'inline-flex' : 'none';
         this.tabsListBtn.style.display = useNav ? 'inline-flex' : 'none';
-        if (this.hasCompactWorkspaceTabs(this.currentSession)) {
-            const tab = document.createElement('div');
-            tab.className = 'editor-tab terminal-editor-tab';
-            if (TERMINAL_WORKSPACE_TAB_KEY === activeWorkspaceTabKey) {
-                tab.classList.add('active');
-            }
 
-            const icon = document.createElement('span');
-            icon.className = 'agent-editor-tab-icon';
-            applyStatusIconState(
-                icon,
-                TERMINAL_TAB_ICON_SVG,
-                getSessionTerminalIndicatorState(this.currentSession)
-            );
-
-            const label = document.createElement('span');
-            label.textContent = 'Terminal';
-
-            tab.onclick = () => this.activateTerminalTab();
-            bindSingleTapActivation(tab, () => this.activateTerminalTab());
-            tab.appendChild(icon);
-            tab.appendChild(label);
-            this.tabsContainer.appendChild(tab);
-        }
-
-        for (const path of state.openFiles) {
-            const splitEnabled = this.isMarkdownSplitViewEnabled(
-                this.currentSession,
-                path
-            );
-            const tab = document.createElement('div');
-            tab.className = 'editor-tab';
-            if (
-                makeFileWorkspaceTabKey(path) === activeWorkspaceTabKey
-                || (
-                    splitEnabled
-                    && makeMarkdownPreviewWorkspaceTabKey(path)
-                        === activeWorkspaceTabKey
-                )
-            ) {
-                tab.classList.add('active');
-            }
-            if (isSupportedMarkdownPath(path)) {
-                tab.classList.add('bound-tab', 'bound-tab-primary');
-            }
-            if (splitEnabled) {
-                tab.classList.add('is-split');
-            }
-            
-            const fileModel = this.getModel(path);
-            if (fileModel && fileModel.readonly) {
-                tab.classList.add('readonly');
-            }
-            if (fileModel?.pendingRemoteConflict) {
-                tab.classList.add('remote-conflict');
-                tab.title = 'Remote change could not be merged automatically.';
-            }
-            
-            const name = path.split('/').pop();
-            const icon = document.createElement('span');
-            icon.className = 'file-editor-tab-icon';
-            icon.innerHTML = this.getIcon(name, false, false);
-
-            if (fileModel?.pendingRemoteConflict) {
-                const conflictMark = document.createElement('span');
-                conflictMark.className = 'remote-conflict-mark';
-                conflictMark.textContent = '!';
-                tab.appendChild(conflictMark);
-            }
-
-            const pendingWrite = this.getPendingFileWrite(this.currentSession, path);
-            if (pendingWrite && pendingWrite.content !== undefined) {
-                const unsavedStar = document.createElement('span');
-                unsavedStar.className = 'unsaved-star';
-                unsavedStar.textContent = '* ';
-                tab.appendChild(unsavedStar);
-            }
-
-            const span = document.createElement('span');
-            span.textContent = name;
-            
-            const closeBtn = document.createElement('button');
-            closeBtn.type = 'button';
-            closeBtn.className = 'close-btn';
-            closeBtn.innerHTML = CLOSE_ICON_SVG;
-            closeBtn.title = 'Close';
-            closeBtn.setAttribute('aria-label', `Close ${name}`);
-            bindTabChildAction(closeBtn, () => {
-                this.closeFile(path);
-            });
-            let unsplitBtn = null;
-
-            if (splitEnabled) {
-                unsplitBtn = document.createElement('span');
-                unsplitBtn.className = 'tab-action-btn markdown-unsplit-btn';
-                unsplitBtn.innerHTML = MARKDOWN_SPLIT_DISABLE_ICON_SVG;
-                unsplitBtn.title = 'Restore tabbed markdown view';
-                unsplitBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    this.setMarkdownSplitView(
-                        path,
-                        false,
-                        this.currentSession
-                    );
-                    this.activateFileTab(path, false, {
-                        focusEditor: false
-                    });
-                };
-                tab.appendChild(unsplitBtn);
-            }
-            
-            tab.onclick = () => this.activateFileTab(path);
-            bindSingleTapActivation(tab, () => this.activateFileTab(path), {
-                ignoreSelector: '.close-btn, .tab-action-btn'
-            });
-            
-            tab.appendChild(icon);
-            tab.appendChild(span);
-            if (unsplitBtn) {
-                tab.appendChild(unsplitBtn);
-            }
-            tab.appendChild(closeBtn);
-            this.tabsContainer.appendChild(tab);
-
-            if (
-                isSupportedMarkdownPath(path)
-                && !splitEnabled
-            ) {
-                const previewTab = document.createElement('div');
-                previewTab.className = 'editor-tab markdown-preview-tab bound-tab bound-tab-secondary';
-                if (
-                    makeMarkdownPreviewWorkspaceTabKey(path)
-                    === activeWorkspaceTabKey
-                ) {
-                    previewTab.classList.add('active');
-                }
-
-                const previewIcon = document.createElement('span');
-                previewIcon.className = 'file-editor-tab-icon';
-                previewIcon.innerHTML = MARKDOWN_PREVIEW_ICON_SVG;
-
-                const previewLabel = document.createElement('span');
-                previewLabel.textContent = 'Preview';
-                let splitBtn = null;
-
-                if (
-                    path !== splitPath
-                    && canUseMarkdownSplitTabsMode()
-                ) {
-                    splitBtn = document.createElement('span');
-                    splitBtn.className = 'tab-action-btn markdown-split-btn';
-                    splitBtn.innerHTML = MARKDOWN_SPLIT_ENABLE_ICON_SVG;
-                    splitBtn.title = 'Show markdown editor and preview side by side';
-                    splitBtn.onclick = (event) => {
-                        event.stopPropagation();
-                        this.setMarkdownSplitView(
-                            path,
-                            true,
-                            this.currentSession
-                        );
-                    };
-                    previewTab.appendChild(splitBtn);
-                }
-
-                previewTab.onclick = () => this.activateMarkdownPreviewTab(path);
-                bindSingleTapActivation(
-                    previewTab,
-                    () => this.activateMarkdownPreviewTab(path),
-                    {
-                        ignoreSelector: '.tab-action-btn'
-                    }
-                );
-
-                previewTab.appendChild(previewIcon);
-                previewTab.appendChild(previewLabel);
-                if (splitBtn) {
-                    previewTab.appendChild(splitBtn);
-                }
-                this.tabsContainer.appendChild(previewTab);
+        const expectedKinds = new Map(
+            this.editorTabs.map((tab) => [tab.key, tab.kind])
+        );
+        for (const tab of Array.from(
+            this.tabsContainer.querySelectorAll('.editor-tab')
+        )) {
+            const key = tab.dataset.editorTabKey || '';
+            if (expectedKinds.get(key) !== tab.dataset.editorTabKind) {
+                tab.remove();
             }
         }
 
-        for (const agentTab of getAgentTabsForSession(this.currentSession)) {
-            const tab = document.createElement('div');
-            tab.className = 'editor-tab agent-editor-tab';
-            if (agentTab.key === activeWorkspaceTabKey) {
-                tab.classList.add('active');
+        for (const [index, tabInfo] of this.editorTabs.entries()) {
+            let tab = this.getEditorTabElement(tabInfo);
+            if (!tab) {
+                tab = this.createEditorTabElement(tabInfo);
             }
-
-            const icon = document.createElement('span');
-            icon.className = 'agent-editor-tab-icon';
-            applyStatusIconState(
-                icon,
-                AGENT_ICON_SVG,
-                getAgentTabIndicatorState(agentTab)
-            );
-
-            const label = document.createElement('span');
-            tab.title = String(getAgentDisplayLabel(agentTab) || '').trim();
-            label.textContent = formatWorkspaceTabTitle(
-                getAgentDisplayLabel(agentTab)
-            );
-
-            const closeBtn = document.createElement('button');
-            closeBtn.type = 'button';
-            closeBtn.className = 'close-btn';
-            closeBtn.innerHTML = CLOSE_ICON_SVG;
-            closeBtn.title = 'Close';
-            closeBtn.setAttribute(
-                'aria-label',
-                `Close ${getAgentDisplayLabel(agentTab) || 'agent tab'}`
-            );
-            bindTabChildAction(closeBtn, () => {
-                void this.closeAgentTab(agentTab.key);
-            });
-
-            tab.onclick = () => this.activateAgentTab(agentTab.key);
-            bindSingleTapActivation(tab, () => this.activateAgentTab(
-                agentTab.key
-            ), {
-                ignoreSelector: '.close-btn'
-            });
-
-            tab.appendChild(icon);
-            tab.appendChild(label);
-            tab.appendChild(closeBtn);
-            this.tabsContainer.appendChild(tab);
+            this.syncEditorTabElement(tab, tabInfo, activeWorkspaceTabKey);
+            const current = this.tabsContainer.children[index] || null;
+            if (current !== tab) {
+                this.tabsContainer.insertBefore(tab, current);
+            }
         }
 
         const scrollActiveIntoView = () => {
@@ -9811,12 +9872,16 @@ class EditorManager {
         requestAnimationFrame(() => {
             diffEditor.layout();
         });
-        details.addEventListener('toggle', () => {
+        const onToggle = () => {
             if (details.open) {
                 requestAnimationFrame(() => {
                     diffEditor.layout();
                 });
             }
+        };
+        details.addEventListener('toggle', onToggle);
+        this.trackAgentTimelineDisposable(host, {
+            dispose: () => details.removeEventListener('toggle', onToggle)
         });
         return host;
     }
@@ -10941,6 +11006,16 @@ function getAgentDefinition(serverId, agentId) {
     ) || null;
 }
 
+function isConfigurableAgentDefinition(definition) {
+    if (!definition) return false;
+    if (typeof definition.configurable === 'boolean') {
+        return definition.configurable;
+    }
+    return definition.id === 'gemini'
+        || definition.id === 'claude'
+        || definition.id === 'copilot';
+}
+
 function setAgentSetupFeedback(message = '', type = '') {
     if (!agentSetupFeedback) return;
     if (!message) {
@@ -10986,6 +11061,13 @@ function describeConfiguredSecrets(prefix, checks) {
 
 function openAgentSetupModal(definition, serverId, options = {}) {
     if (!definition || !agentSetupModal) return;
+    if (!isConfigurableAgentDefinition(definition)) {
+        alert(buildAgentDefinitionMeta(definition), {
+            type: 'warning',
+            title: definition.label || 'Agent'
+        });
+        return;
+    }
     agentSetupState.serverId = serverId;
     agentSetupState.agentId = definition.id;
     agentSetupState.retrySessionKey = options.sessionKey || '';
@@ -11010,6 +11092,8 @@ function openAgentSetupModal(definition, serverId, options = {}) {
     agentSetupGeminiKey.value = '';
     agentSetupGoogleKey.value = '';
     agentSetupClaudeKey.value = '';
+    agentSetupClaudeBaseUrl.value = '';
+    agentSetupClaudeAuthToken.value = '';
     agentSetupClaudeUseVertex.checked = false;
     agentSetupClaudeProject.value = '';
     agentSetupClaudeRegion.value = '';
@@ -11029,6 +11113,7 @@ function openAgentSetupModal(definition, serverId, options = {}) {
         ) || 'Paste one key to save it for this host.';
     } else if (definition.id === 'claude') {
         agentSetupClaude.hidden = false;
+        agentSetupClaudeBaseUrl.value = config.anthropicBaseUrl || '';
         agentSetupClaudeUseVertex.checked = !!config.useVertex;
         agentSetupClaudeProject.value = config.vertexProjectId
             || config.gcloudProject
@@ -11037,8 +11122,14 @@ function openAgentSetupModal(definition, serverId, options = {}) {
         agentSetupClaudeNote.textContent = [
             describeConfiguredSecrets(
                 'Saved auth',
-                [config.hasAnthropicApiKey ? 'ANTHROPIC_API_KEY' : '']
+                [
+                    config.hasAnthropicApiKey ? 'ANTHROPIC_API_KEY' : '',
+                    config.hasAnthropicAuthToken
+                        ? 'ANTHROPIC_AUTH_TOKEN'
+                        : ''
+                ]
             ),
+            config.anthropicBaseUrl ? 'ANTHROPIC_BASE_URL configured.' : '',
             config.hasGoogleCredentials
                 ? 'Google credentials file already configured.'
                 : '',
@@ -11089,6 +11180,12 @@ async function saveAgentSetupConfig() {
     } else if (agentId === 'claude') {
         if (agentSetupClaudeKey.value.trim()) {
             env.ANTHROPIC_API_KEY = agentSetupClaudeKey.value.trim();
+        }
+        if (agentSetupClaudeBaseUrl.value.trim()) {
+            env.ANTHROPIC_BASE_URL = agentSetupClaudeBaseUrl.value.trim();
+        }
+        if (agentSetupClaudeAuthToken.value.trim()) {
+            env.ANTHROPIC_AUTH_TOKEN = agentSetupClaudeAuthToken.value.trim();
         }
         if (agentSetupClaudeUseVertex.checked) {
             env.CLAUDE_CODE_USE_VERTEX = '1';
@@ -11262,10 +11359,17 @@ function openAgentDropdown(session, anchor) {
             markAgentDefinitionUsed(definition.id);
             if (definition.available === false) {
                 closeAgentDropdown();
-                openAgentSetupModal(definition, session.serverId, {
-                    sessionKey: session.key,
-                    anchor
-                });
+                if (isConfigurableAgentDefinition(definition)) {
+                    openAgentSetupModal(definition, session.serverId, {
+                        sessionKey: session.key,
+                        anchor
+                    });
+                } else {
+                    alert(buildAgentDefinitionMeta(definition), {
+                        type: 'warning',
+                        title: definition.label || 'Agent'
+                    });
+                }
                 return;
             }
             button.disabled = true;
@@ -12600,6 +12704,7 @@ class AgentTab {
         const existing = this.toolCalls.get(id);
         const include = String(options.include || '').trim();
         if (!include && existing?.detailsLoaded) return existing;
+        if (include && existing?.loadedDetailTypes?.includes(include)) return existing;
         const params = new URLSearchParams();
         if (include) {
             params.set('include', include);
@@ -12634,11 +12739,16 @@ class AgentTab {
                 && statusClass !== 'pending'
                 && statusClass !== 'running'
             );
+            const loadedTypes = previous.loadedDetailTypes || [];
+            const nextLoadedTypes = include && !loadedTypes.includes(include)
+                ? [...loadedTypes, include]
+                : loadedTypes;
             const next = complete
                 ? {
                     ...normalizedDetail,
                     detailsLoaded: true,
-                    detailsAvailable: false
+                    detailsAvailable: false,
+                    loadedDetailTypes: ['all']
                 }
                 : {
                     ...previous,
@@ -12648,7 +12758,8 @@ class AgentTab {
                         normalizedDetail.content
                     ),
                     detailsLoaded: false,
-                    detailsAvailable: true
+                    detailsAvailable: true,
+                    loadedDetailTypes: nextLoadedTypes
                 };
             this.toolCalls.set(data.toolCall.toolCallId, next);
             return next;

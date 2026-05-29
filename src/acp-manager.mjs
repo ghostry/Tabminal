@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -318,6 +319,8 @@ const AGENT_CONFIG_ENV_KEYS = {
     gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     claude: [
         'ANTHROPIC_API_KEY',
+        'ANTHROPIC_BASE_URL',
+        'ANTHROPIC_AUTH_TOKEN',
         'CLAUDE_CODE_USE_VERTEX',
         'ANTHROPIC_VERTEX_PROJECT_ID',
         'GCLOUD_PROJECT',
@@ -364,6 +367,10 @@ function buildAgentConfigSummary(agentId, config = {}) {
         case 'claude':
             return {
                 hasAnthropicApiKey: hasConfiguredValue(env.ANTHROPIC_API_KEY),
+                anthropicBaseUrl: env.ANTHROPIC_BASE_URL || '',
+                hasAnthropicAuthToken: hasConfiguredValue(
+                    env.ANTHROPIC_AUTH_TOKEN
+                ),
                 useVertex: env.CLAUDE_CODE_USE_VERTEX === '1',
                 hasVertexProjectId: hasConfiguredValue(
                     env.ANTHROPIC_VERTEX_PROJECT_ID
@@ -469,6 +476,7 @@ function parseGeminiListedSessions(output) {
 let ghCopilotCliInstalledCache = null;
 let ghAuthTokenCache = null;
 const availabilityProbeCache = new Map();
+const userShellEnvCache = new Map();
 
 function getCachedProbeValue(key) {
     if (!key) return null;
@@ -590,6 +598,7 @@ function probeGhAuth(runtimeEnv = {}) {
 
 const DEFAULT_AVAILABILITY_PROBES = {
     commandExists,
+    probeCommandVersion,
     hasGhCopilotWrapper,
     hasGhCopilotCliInstalled,
     probeCodexAuth,
@@ -684,10 +693,114 @@ function buildAugmentedPath(env = {}) {
         .join(delimiter);
 }
 
+function parseNullSeparatedEnv(output = '') {
+    const env = {};
+    const marker = '__TABMINAL_ENV_START__';
+    const markerIndex = output.indexOf(marker);
+    const body = markerIndex === -1
+        ? output
+        : output.slice(markerIndex + marker.length);
+    for (const entry of body.split('\0')) {
+        if (!entry) continue;
+        const separator = entry.indexOf('=');
+        if (separator <= 0) continue;
+        env[entry.slice(0, separator)] = entry.slice(separator + 1);
+    }
+    return env;
+}
+
+function getShellEnvProbeCandidates(env = {}) {
+    const configuredShell = String(env.SHELL || process.env.SHELL || '').trim();
+    const candidates = [
+        configuredShell,
+        '/bin/bash',
+        '/usr/bin/bash',
+        '/bin/zsh',
+        '/usr/bin/zsh',
+        '/bin/fish',
+        '/usr/bin/fish',
+        '/bin/sh'
+    ].filter(Boolean);
+    const seen = new Set();
+    return candidates.filter((candidate) => {
+        if (seen.has(candidate)) return false;
+        seen.add(candidate);
+        return true;
+    });
+}
+
+function readUserShellEnv(shellPath, env = {}) {
+    const name = path.basename(shellPath || '').toLowerCase();
+    const script = "printf '%s\\0' __TABMINAL_ENV_START__; env -0";
+    const args = name.includes('bash')
+        || name.includes('zsh')
+        || name.includes('fish')
+        ? ['-i', '-c', script]
+        : ['-c', script];
+    const result = spawnSync(shellPath, args, {
+        encoding: 'utf8',
+        timeout: 1500,
+        env: {
+            ...process.env,
+            ...env
+        }
+    });
+    if (result.status !== 0 || !result.stdout) {
+        return {};
+    }
+    return parseNullSeparatedEnv(result.stdout);
+}
+
+function getUserShellEnv(env = {}) {
+    const cacheKey = JSON.stringify({
+        home: env.HOME || process.env.HOME || '',
+        shell: env.SHELL || process.env.SHELL || ''
+    });
+    const cached = getCachedProbeValue(`shell-env:${cacheKey}`);
+    if (cached) return cached;
+    if (userShellEnvCache.has(cacheKey)) {
+        return userShellEnvCache.get(cacheKey);
+    }
+
+    const merged = {};
+    const pathEntries = [];
+    const seenPathEntries = new Set();
+    const addPathEntries = (value) => {
+        for (const entry of String(value || '').split(path.delimiter)) {
+            const normalized = entry.trim();
+            if (!normalized || seenPathEntries.has(normalized)) continue;
+            seenPathEntries.add(normalized);
+            pathEntries.push(normalized);
+        }
+    };
+    for (const shellPath of getShellEnvProbeCandidates(env)) {
+        const shellEnv = readUserShellEnv(shellPath, env);
+        if (shellEnv.PATH) {
+            Object.assign(merged, shellEnv);
+            addPathEntries(shellEnv.PATH);
+        }
+    }
+    if (pathEntries.length > 0) {
+        merged.PATH = pathEntries.join(path.delimiter);
+    }
+
+    userShellEnvCache.set(cacheKey, merged);
+    setCachedProbeValue(`shell-env:${cacheKey}`, merged);
+    return merged;
+}
+
 function withAgentPath(env = {}) {
+    const shellEnv = getUserShellEnv(env);
+    const mergedEnv = {
+        ...shellEnv,
+        ...env
+    };
+    if (shellEnv.PATH && env.PATH) {
+        mergedEnv.PATH = `${shellEnv.PATH}${path.delimiter}${env.PATH}`;
+    }
     return {
-        ...env,
-        PATH: buildAugmentedPath(env)
+        ...mergedEnv,
+        PATH: buildAugmentedPath(mergedEnv)
     };
 }
 
@@ -724,12 +837,101 @@ function hasGhCopilotWrapper() {
 }
 
 function commandExists(command, env = process.env) {
-    const checker = process.platform === 'win32' ? 'where' : 'which';
-    const result = spawnSync(checker, [command], {
-        stdio: 'ignore',
+    if (String(command || '').includes(path.sep)) {
+        try {
+            fsSync.accessSync(command, fsSync.constants.X_OK);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+    const runtimeEnv = withAgentPath(env);
+    const result = process.platform === 'win32'
+        ? spawnSync('where', [command], {
+            stdio: 'ignore',
+            env: runtimeEnv
+        })
+        : spawnSync('sh', ['-c', `command -v "$1" >/dev/null 2>&1`, 'sh', command], {
+            stdio: 'ignore',
+            env: runtimeEnv
+        });
+    if (result.status === 0) {
+        return true;
+    }
+    if (process.platform === 'win32') {
+        return false;
+    }
+    const whereis = spawnSync('whereis', ['-b', command], {
+        encoding: 'utf8',
+        timeout: 1000,
+        env: runtimeEnv
+    });
+    if (whereis.status !== 0 || !whereis.stdout) {
+        return false;
+    }
+    const [, rawPaths = ''] = whereis.stdout.split(':');
+    return rawPaths.trim().split(/\s+/).some(Boolean);
+}
+
+function probeCommandVersion(command, args = ['--version'], env = process.env) {
+    const cacheKey = `command-version:${command}:${args.join(' ')}`
+        + `:${getAvailabilityCacheScopeKey(env)}`;
+    const cached = getCachedProbeValue(cacheKey);
+    if (cached) return cached;
+
+    const result = spawnSync(command, args, {
+        encoding: 'utf8',
+        timeout: 15000,
         env: withAgentPath(env)
     });
-    return result.status === 0;
+    if (result.status === 0) {
+        return setCachedProbeValue(cacheKey, {
+            available: true,
+            reason: ''
+        });
+    }
+    return {
+        available: false,
+        reason: 'installed but failed to run'
+    };
+}
+
+function findCachedNpxBinary(command, env = process.env) {
+    if (!command || path.basename(command) !== command) return '';
+    const home = String(env.HOME || process.env.HOME || '').trim();
+    if (!home) return '';
+    const npxRoot = path.join(home, '.npm', '_npx');
+    let entries = [];
+    try {
+        entries = fsSync.readdirSync(npxRoot, { withFileTypes: true });
+    } catch {
+        return '';
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = path.join(
+            npxRoot,
+            entry.name,
+            'node_modules',
+            '.bin',
+            command
+        );
+        try {
+            fsSync.accessSync(candidate, fsSync.constants.X_OK);
+            const realCandidate = fsSync.realpathSync(candidate);
+            const bundledBinary = path.join(path.dirname(realCandidate), `.${command}`);
+            try {
+                fsSync.accessSync(bundledBinary, fsSync.constants.X_OK);
+                return bundledBinary;
+            } catch {
+                // Fall back to the wrapper if the cached native binary is absent.
+            }
+            return candidate;
+        } catch {
+            // Keep looking for an executable npx cache entry.
+        }
+    }
+    return '';
 }
 
 function getAttachmentExtension(name = '') {
@@ -794,6 +996,9 @@ function makeBuiltInDefinitions() {
     const hasGeminiBinary = commandExists('gemini');
     const hasCopilotBinary = commandExists('copilot');
     const hasGhCopilot = hasGhCopilotWrapper();
+    const opencodeCommand = commandExists('opencode')
+        ? 'opencode'
+        : (findCachedNpxBinary('opencode') || 'opencode');
     const codexAcpPlatformPackage = getCodexAcpPlatformPackage();
     const codexAcpPlatformBinary = codexAcpPlatformPackage
         ? codexAcpPlatformPackage.split('/').pop()
@@ -841,12 +1046,13 @@ function makeBuiltInDefinitions() {
         },
         {
             id: 'opencode',
-            label: 'opencode',
+            label: 'Open Code',
             description: 'opencode ACP server',
             websiteUrl: 'https://opencode.ai/docs/acp/',
-            command: 'opencode',
+            command: opencodeCommand,
             args: ['acp'],
-            commandLabel: 'opencode acp'
+            commandLabel: 'opencode acp',
+            versionArgs: ['--version']
         },
         {
             id: 'copilot',
@@ -862,7 +1068,8 @@ function makeBuiltInDefinitions() {
                 : 'gh copilot -- --acp --stdio',
             setupCommandLabel: hasGhCopilot
                 ? 'gh copilot'
-                : 'Install GitHub Copilot CLI'
+                : 'Install GitHub Copilot CLI',
+            versionArgs: hasCopilotBinary ? ['version'] : null
         },
         {
             id: 'omp',
@@ -922,6 +1129,15 @@ function getDefinitionAvailability(
         }
     }
 
+    if (Array.isArray(definition.versionArgs)) {
+        const versionAvailability = (
+            probes.probeCommandVersion || probeCommandVersion
+        )(definition.command, definition.versionArgs, runtimeEnv);
+        if (!versionAvailability.available) {
+            return versionAvailability;
+        }
+    }
+
     if (
         definition.id === 'copilot'
         && definition.command === 'gh'
@@ -958,6 +1174,12 @@ function getDefinitionAvailability(
         available: true,
         reason: ''
     };
+}
+
+function isConfigurableDefinition(definition = {}) {
+    return definition.id === 'gemini'
+        || definition.id === 'claude'
+        || definition.id === 'copilot';
 }
 
 function formatAgentStartupError(definition, error) {
@@ -4926,6 +5148,7 @@ export class AcpManager extends EventEmitter {
                 websiteUrl: definition.websiteUrl || '',
                 commandLabel: definition.commandLabel,
                 setupCommandLabel: definition.setupCommandLabel || '',
+                configurable: isConfigurableDefinition(definition),
                 available: availability.available,
                 reason: availability.reason,
                 config: this.getSerializedAgentConfig(definition.id)

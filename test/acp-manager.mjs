@@ -484,6 +484,7 @@ describe('AcpManager', () => {
         const manager = new AcpManager({
             availabilityProbes: {
                 commandExists: (command) => command === 'omp',
+                probeCommandVersion: () => ({ available: true, reason: '' }),
                 hasGhCopilotWrapper: () => false,
                 hasGhCopilotCliInstalled: () => false,
                 probeCodexAuth: () => ({ available: true, reason: '' }),
@@ -504,9 +505,25 @@ describe('AcpManager', () => {
     });
 
     it('exposes opencode through its documented ACP command', async () => {
+        const versionProbes = [];
         const manager = new AcpManager({
             availabilityProbes: {
-                commandExists: (command) => command === 'opencode',
+                commandExists: (command) => (
+                    path.basename(command) === 'opencode'
+                    || path.basename(command) === '.opencode'
+                ),
+                probeCommandVersion: (command, args) => {
+                    versionProbes.push({ command, args });
+                    const basename = path.basename(command);
+                    return {
+                        available: (
+                            basename === 'opencode'
+                            || basename === '.opencode'
+                        )
+                            && args?.[0] === '--version',
+                        reason: ''
+                    };
+                },
                 hasGhCopilotWrapper: () => false,
                 hasGhCopilotCliInstalled: () => false,
                 probeCodexAuth: () => ({ available: true, reason: '' }),
@@ -518,9 +535,12 @@ describe('AcpManager', () => {
                 (definition) => definition.id === 'opencode'
             );
             assert.ok(opencode);
-            assert.strictEqual(opencode.label, 'opencode');
+            assert.strictEqual(opencode.label, 'Open Code');
             assert.strictEqual(opencode.commandLabel, 'opencode acp');
             assert.strictEqual(opencode.available, true);
+            assert.strictEqual(opencode.configurable, false);
+            assert.match(path.basename(versionProbes[0]?.command), /^\.?opencode$/);
+            assert.deepStrictEqual(versionProbes[0]?.args, ['--version']);
         } finally {
             await manager.dispose().catch(() => {});
         }
@@ -2107,6 +2127,8 @@ describe('AcpManager', () => {
         await manager.updateAgentConfig('claude', {
             env: {
                 ANTHROPIC_API_KEY: 'alpha',
+                ANTHROPIC_BASE_URL: 'https://anthropic.example.test',
+                ANTHROPIC_AUTH_TOKEN: 'token-a',
                 CLAUDE_CODE_USE_VERTEX: '1',
                 ANTHROPIC_VERTEX_PROJECT_ID: 'proj-a'
             }
@@ -2121,8 +2143,22 @@ describe('AcpManager', () => {
 
         assert.deepEqual(getPersistedConfigs().claude.env, {
             ANTHROPIC_API_KEY: 'alpha',
+            ANTHROPIC_BASE_URL: 'https://anthropic.example.test',
+            ANTHROPIC_AUTH_TOKEN: 'token-a',
             ANTHROPIC_VERTEX_PROJECT_ID: 'proj-a',
             CLOUD_ML_REGION: 'us-central1'
+        });
+
+        assert.deepEqual(manager.getSerializedAgentConfig('claude'), {
+            hasAnthropicApiKey: true,
+            anthropicBaseUrl: 'https://anthropic.example.test',
+            hasAnthropicAuthToken: true,
+            useVertex: false,
+            hasVertexProjectId: true,
+            vertexProjectId: 'proj-a',
+            gcloudProject: '',
+            cloudMlRegion: 'us-central1',
+            hasGoogleCredentials: false
         });
     });
 

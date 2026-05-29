@@ -1338,6 +1338,9 @@ body {
 
 .agent-setup-content {
     max-width: 520px;
+    max-height: calc(100dvh - 2rem);
+    overflow-y: auto;
+    box-sizing: border-box;
     text-align: left;
 }
 
@@ -1348,6 +1351,10 @@ body {
 .agent-setup-section {
     display: grid;
     gap: 0.5rem;
+}
+
+.agent-setup-section[hidden] {
+    display: none;
 }
 
 .agent-setup-section label {
