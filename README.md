@@ -8,7 +8,7 @@
 我们的需求变成了一个稳定的终端 + 简单的文件管理 + 简单的git管理
 
 ## 快速开始
-npm 全局定义为 /home/coder/.npm-g 执行时无需sudo
+npm 全局定义为 /home/coder/.npm-global 执行时无需sudo
 
 ```
 git clone https://github.com/ghostry/Tabminal

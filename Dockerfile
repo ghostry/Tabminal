@@ -20,8 +20,8 @@ COPY package.json package-lock.json ./
 
 RUN npm install
 
-ENV NPM_CONFIG_PREFIX=/home/coder/.npm-g
-ENV PATH=/home/coder/.npm-g/bin:$PATH
+ENV NPM_CONFIG_PREFIX=/home/coder/.npm-global
+ENV PATH=/home/coder/.npm-global/bin:$PATH
 ENV PORT=9846
 ENV HOST=0.0.0.0
 ENV PASSWORD=admin
