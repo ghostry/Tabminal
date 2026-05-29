@@ -315,6 +315,7 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
 const NPX_COMMAND = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 const CURRENT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TEST_AGENT_PATH = path.join(CURRENT_DIR, 'acp-test-agent.mjs');
+const CCR_CODE_SHIM_PATH = path.join(CURRENT_DIR, '..', 'scripts', 'ccr-code');
 const AGENT_CONFIG_ENV_KEYS = {
     gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
     claude: [
@@ -348,6 +349,16 @@ function normalizeConfiguredEnv(agentId, env) {
     for (const [key, value] of Object.entries(env)) {
         if (!allowedKeys.has(key)) continue;
         normalized[key] = typeof value === 'string' ? value : '';
+    }
+    return normalized;
+}
+
+function normalizeDefinitionEnv(env) {
+    if (!env || typeof env !== 'object') return {};
+    const normalized = {};
+    for (const [key, value] of Object.entries(env)) {
+        if (typeof key !== 'string' || !key.trim()) continue;
+        normalized[key] = typeof value === 'string' ? value : String(value ?? '');
     }
     return normalized;
 }
@@ -677,6 +688,7 @@ function buildAugmentedPath(env = {}) {
         .map((entry) => entry.trim())
         .filter(Boolean);
     const extraEntries = [
+        home ? path.join(home, '.npm-global', 'bin') : '',
         home ? path.join(home, '.local', 'bin') : '',
         home ? path.join(home, 'bin') : '',
         '/opt/homebrew/bin',
@@ -807,6 +819,7 @@ function withAgentPath(env = {}) {
 function mergeDefinitionEnv(definition, agentConfig = {}) {
     const env = withAgentPath({
         ...process.env,
+        ...normalizeDefinitionEnv(definition.env),
         ...normalizeConfiguredEnv(definition.id, agentConfig.env)
     });
     if (definition.id === 'copilot') {
@@ -1045,10 +1058,27 @@ function makeBuiltInDefinitions() {
             commandLabel: 'npx @zed-industries/claude-code-acp@latest'
         },
         {
+            id: 'ccr-code',
+            label: 'CCR Code',
+            description: 'Claude Code Router through the Claude Code ACP adapter',
+            websiteUrl: 'https://musistudio.github.io/claude-code-router/docs/cli/quick-start',
+            command: NPX_COMMAND,
+            args: [
+                '-p',
+                '@zed-industries/claude-code-acp@latest',
+                'claude-code-acp'
+            ],
+            commandLabel: 'ccr code',
+            availabilityCommand: 'ccr',
+            env: {
+                CLAUDE_CODE_EXECUTABLE: CCR_CODE_SHIM_PATH
+            }
+        },
+        {
             id: 'opencode',
             label: 'Open Code',
             description: 'opencode ACP server',
-            websiteUrl: 'https://opencode.ai/docs/acp/',
+            websiteUrl: 'https://opencode.ai/docs',
             command: opencodeCommand,
             args: ['acp'],
             commandLabel: 'opencode acp',
@@ -1075,7 +1105,7 @@ function makeBuiltInDefinitions() {
             id: 'omp',
             label: 'Oh My Pi',
             description: 'Oh My Pi ACP server',
-            websiteUrl: 'https://github.com/ghostry/oh-my-pi',
+            websiteUrl: 'https://omp.sh/docs/quickstart',
             command: 'omp',
             args: ['acp'],
             commandLabel: 'omp acp'
@@ -1101,11 +1131,24 @@ function getDefinitionAvailability(
 ) {
     const commandExistsFn = probes.commandExists || commandExists;
     const runtimeEnv = mergeDefinitionEnv(definition, agentConfig);
-    if (!commandExistsFn(definition.command, runtimeEnv)) {
+    const availabilityCommand = definition.availabilityCommand
+        || definition.command;
+    if (!commandExistsFn(availabilityCommand, runtimeEnv)) {
         return {
             available: false,
             reason: 'not installed'
         };
+    }
+
+    for (const command of Array.isArray(definition.requiredCommands)
+        ? definition.requiredCommands
+        : []) {
+        if (!commandExistsFn(command, runtimeEnv)) {
+            return {
+                available: false,
+                reason: `${command} not installed`
+            };
+        }
     }
 
     if (definition.id === 'gemini') {

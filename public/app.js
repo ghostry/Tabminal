@@ -11016,6 +11016,20 @@ function isConfigurableAgentDefinition(definition) {
         || definition.id === 'copilot';
 }
 
+function shouldOpenAgentWebsiteWhenUnavailable(definition) {
+    return ['ccr-code', 'opencode', 'omp'].includes(definition?.id)
+        && !!definition.websiteUrl;
+}
+
+function openAgentDefinitionWebsite(definition) {
+    if (!definition?.websiteUrl) return;
+    window.open(
+        definition.websiteUrl,
+        '_blank',
+        'noopener,noreferrer'
+    );
+}
+
 function setAgentSetupFeedback(message = '', type = '') {
     if (!agentSetupFeedback) return;
     if (!message) {
@@ -11359,6 +11373,10 @@ function openAgentDropdown(session, anchor) {
             markAgentDefinitionUsed(definition.id);
             if (definition.available === false) {
                 closeAgentDropdown();
+                if (shouldOpenAgentWebsiteWhenUnavailable(definition)) {
+                    openAgentDefinitionWebsite(definition);
+                    return;
+                }
                 if (isConfigurableAgentDefinition(definition)) {
                     openAgentSetupModal(definition, session.serverId, {
                         sessionKey: session.key,
@@ -11418,11 +11436,7 @@ function openAgentDropdown(session, anchor) {
             infoButton.innerHTML = '<span aria-hidden="true">i</span>';
             infoButton.onclick = (event) => {
                 event.stopPropagation();
-                window.open(
-                    definition.websiteUrl,
-                    '_blank',
-                    'noopener,noreferrer'
-                );
+                openAgentDefinitionWebsite(definition);
             };
             entry.appendChild(infoButton);
         }

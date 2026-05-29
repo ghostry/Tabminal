@@ -498,6 +498,7 @@ describe('AcpManager', () => {
             assert.ok(omp);
             assert.strictEqual(omp.label, 'Oh My Pi');
             assert.strictEqual(omp.commandLabel, 'omp acp');
+            assert.strictEqual(omp.websiteUrl, 'https://omp.sh/docs/quickstart');
             assert.strictEqual(omp.available, true);
         } finally {
             await manager.dispose().catch(() => {});
@@ -537,10 +538,54 @@ describe('AcpManager', () => {
             assert.ok(opencode);
             assert.strictEqual(opencode.label, 'Open Code');
             assert.strictEqual(opencode.commandLabel, 'opencode acp');
+            assert.strictEqual(opencode.websiteUrl, 'https://opencode.ai/docs');
             assert.strictEqual(opencode.available, true);
             assert.strictEqual(opencode.configurable, false);
             assert.match(path.basename(versionProbes[0]?.command), /^\.?opencode$/);
             assert.deepStrictEqual(versionProbes[0]?.args, ['--version']);
+        } finally {
+            await manager.dispose().catch(() => {});
+        }
+    });
+
+    it('exposes CCR Code through the Claude Code ACP adapter', async () => {
+        const commands = [];
+        const manager = new AcpManager({
+            availabilityProbes: {
+                commandExists: (command) => {
+                    commands.push(command);
+                    return command === 'ccr';
+                },
+                probeCommandVersion: () => ({ available: true, reason: '' }),
+                hasGhCopilotWrapper: () => false,
+                hasGhCopilotCliInstalled: () => false,
+                probeCodexAuth: () => ({ available: true, reason: '' }),
+                probeGhAuth: () => ({ available: true, reason: '' })
+            }
+        });
+        try {
+            const ccrCode = (await manager.listDefinitions()).find(
+                (definition) => definition.id === 'ccr-code'
+            );
+            const builtIn = manager.definitions.find(
+                (definition) => definition.id === 'ccr-code'
+            );
+            assert.ok(ccrCode);
+            assert.ok(builtIn);
+            assert.strictEqual(ccrCode.label, 'CCR Code');
+            assert.strictEqual(ccrCode.commandLabel, 'ccr code');
+            assert.deepStrictEqual(builtIn.args, [
+                '-p',
+                '@zed-industries/claude-code-acp@latest',
+                'claude-code-acp'
+            ]);
+            assert.strictEqual(
+                ccrCode.websiteUrl,
+                'https://musistudio.github.io/claude-code-router/docs/cli/quick-start'
+            );
+            assert.strictEqual(ccrCode.available, true);
+            assert.strictEqual(ccrCode.configurable, false);
+            assert.ok(commands.includes('ccr'));
         } finally {
             await manager.dispose().catch(() => {});
         }
