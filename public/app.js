@@ -55,6 +55,10 @@ clearDeprecatedPasswordHashAuthStorage();
 // Detect Mobile/Tablet (focus on touch capability for font sizing)
 // Logic: If the device supports touch, we assume it needs larger fonts (14px)
 const IS_MOBILE = navigator.maxTouchPoints > 0;
+const MOBILE_EDITOR_EXTRA_SCROLL_LINES = 100;
+const MOBILE_EDITOR_EXTRA_SCROLL_LINE_HEIGHT = 20;
+const MOBILE_EDITOR_EXTRA_SCROLL_PADDING =
+    MOBILE_EDITOR_EXTRA_SCROLL_LINES * MOBILE_EDITOR_EXTRA_SCROLL_LINE_HEIGHT;
 
 const AGENT_MESSAGE_MAX_RENDER_BYTES = 64 * 1024;
 const SYSTEM_STATS_INTERVAL_MS = 10_000;
@@ -6257,7 +6261,10 @@ class EditorManager {
                 fontSize: IS_MOBILE ? 14 : 12,
                 fontFamily: "'Monaspace Neon', \"SF Mono Terminal\", \"SFMono-Regular\", \"SF Mono\", \"JetBrains Mono\", Menlo, Consolas, monospace",
                 wordWrap: this.getEditorWordWrapOption(),
-                scrollBeyondLastLine: false,
+                scrollBeyondLastLine: IS_MOBILE,
+                ...(IS_MOBILE
+                    ? { padding: { bottom: MOBILE_EDITOR_EXTRA_SCROLL_PADDING } }
+                    : {}),
             });
             
             this.editor.onDidChangeModelContent(() => {
