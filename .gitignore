@@ -125,6 +125,7 @@ dist
 /config.json
 
 # local helper scripts
+deploy.sh
 reploy.sh
 
 # native apps
