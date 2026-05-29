@@ -8,6 +8,8 @@ import net from 'node:net';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
+import { execFile } from 'node:child_process';
+import util from 'node:util';
 
 import Koa from 'koa';
 import serve from 'koa-static';
@@ -44,6 +46,7 @@ import { alan, network, web } from 'utilitas';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
+const execFileAsync = util.promisify(execFile);
 
 const app = new Koa();
 const router = new Router();
@@ -1252,25 +1255,131 @@ class HostClientConnection {
         const dirPath = String(message?.payload?.path || message?.id || '').trim();
         if (!dirPath || this.fileTreeWatchers.has(dirPath)) return;
         let timer = null;
-        try {
-            const watcher = fs.watch(path.resolve(process.cwd(), dirPath), () => {
+        const childWatchers = new Map();
+        const gitWatchers = new Map();
+        const absoluteDirPath = path.resolve(process.cwd(), dirPath);
+        const sendChanged = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                this.send({
+                    type: 'file.tree.changed',
+                    path: dirPath,
+                    version: `${Date.now()}`
+                });
+            }, 200);
+        };
+        const closeChildWatchers = () => {
+            for (const watcher of childWatchers.values()) {
+                watcher.close();
+            }
+            childWatchers.clear();
+        };
+        const closeGitWatchers = () => {
+            for (const watcher of gitWatchers.values()) {
+                watcher.close();
+            }
+            gitWatchers.clear();
+        };
+        const entry = {
+            watcher: null,
+            closed: false,
+            close: () => {
+                entry.closed = true;
                 clearTimeout(timer);
-                timer = setTimeout(() => {
-                    this.send({
-                        type: 'file.tree.changed',
-                        path: dirPath,
-                        version: `${Date.now()}`
-                    });
-                }, 200);
-            });
-            this.fileTreeWatchers.set(dirPath, {
-                watcher,
-                close: () => {
-                    clearTimeout(timer);
-                    watcher.close();
+                entry.watcher?.close();
+                closeChildWatchers();
+                closeGitWatchers();
+            }
+        };
+        const refreshChildWatchers = async () => {
+            let dirents;
+            try {
+                dirents = await fsPromises.readdir(absoluteDirPath, {
+                    withFileTypes: true
+                });
+            } catch {
+                return;
+            }
+            if (entry.closed) return;
+
+            const nextPaths = new Set();
+            for (const dirent of dirents) {
+                if (!dirent.isFile()) continue;
+                const childPath = path.join(absoluteDirPath, dirent.name);
+                nextPaths.add(childPath);
+                if (childWatchers.has(childPath)) continue;
+                try {
+                    const childWatcher = fs.watch(childPath, sendChanged);
+                    childWatchers.set(childPath, childWatcher);
+                } catch {
+                    // 刷新 watcher 时文件可能已被删除，忽略即可。
                 }
+            }
+
+            for (const [childPath, watcher] of childWatchers) {
+                if (nextPaths.has(childPath)) continue;
+                watcher.close();
+                childWatchers.delete(childPath);
+            }
+        };
+        const watchGitPath = (targetPath) => {
+            if (!targetPath || gitWatchers.has(targetPath)) return;
+            try {
+                const watcher = fs.watch(targetPath, sendChanged);
+                gitWatchers.set(targetPath, watcher);
+            } catch {
+                // Git 元数据路径可能要到首次提交或 ref 更新后才出现。
+            }
+        };
+        const refreshGitWatchers = async () => {
+            let stdout;
+            try {
+                ({ stdout } = await execFileAsync(
+                    'git',
+                    ['rev-parse', '--git-dir', '--show-toplevel', '--abbrev-ref', 'HEAD'],
+                    { cwd: absoluteDirPath, timeout: 5000 }
+                ));
+            } catch {
+                return;
+            }
+            if (entry.closed) return;
+
+            const [gitDirRaw, repoRootRaw, branchRaw] = stdout
+                .split('\n')
+                .map((line) => line.trim());
+            if (!gitDirRaw || !repoRootRaw) return;
+
+            const repoRoot = path.resolve(repoRootRaw);
+            const gitDir = path.isAbsolute(gitDirRaw)
+                ? gitDirRaw
+                : path.resolve(repoRoot, gitDirRaw);
+            const branch = branchRaw && branchRaw !== 'HEAD'
+                ? branchRaw
+                : '';
+
+            watchGitPath(gitDir);
+            watchGitPath(path.join(gitDir, 'index'));
+            watchGitPath(path.join(gitDir, 'HEAD'));
+            watchGitPath(path.join(gitDir, 'packed-refs'));
+            watchGitPath(path.join(gitDir, 'refs', 'heads'));
+            watchGitPath(path.join(gitDir, 'logs', 'HEAD'));
+            watchGitPath(path.join(gitDir, 'logs', 'refs', 'heads'));
+            if (branch) {
+                watchGitPath(path.join(gitDir, 'refs', 'heads', ...branch.split('/')));
+                watchGitPath(path.join(gitDir, 'logs', 'refs', 'heads', ...branch.split('/')));
+            }
+        };
+        try {
+            entry.watcher = fs.watch(absoluteDirPath, () => {
+                sendChanged();
+                void refreshChildWatchers();
+                void refreshGitWatchers();
             });
+            this.fileTreeWatchers.set(dirPath, entry);
+            void refreshChildWatchers();
+            void refreshGitWatchers();
         } catch (error) {
+            entry.close();
             this.send({
                 type: 'file.watch.error',
                 path: dirPath,
