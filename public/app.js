@@ -13184,6 +13184,20 @@ class Session {
         return true;
     }
 
+    clearMobileTerminalSelection() {
+        this.mobileTerminalSelection = null;
+        this.mainTerm?.clearSelection?.();
+        this.hideMobileTerminalSelectionMenu();
+    }
+
+    isTerminalPointInMobileSelection(clientX, clientY) {
+        const selection = this.mobileTerminalSelection;
+        const position = this.getTerminalPositionAtClientPoint(clientX, clientY);
+        if (!selection || !position) return false;
+        return this.compareTerminalPositions(position, selection.start) >= 0
+            && this.compareTerminalPositions(position, selection.end) < 0;
+    }
+
     selectMobileTerminalWordAt(clientX, clientY) {
         const position = this.getTerminalPositionAtClientPoint(clientX, clientY);
         if (!position) return false;
@@ -13418,17 +13432,32 @@ class Session {
         let longPressFired = false;
         let startX = 0;
         let startY = 0;
+        let lastTapAt = 0;
+        let lastTapX = 0;
+        let lastTapY = 0;
         const moveThreshold = 8;
+        const doubleTapDelay = 320;
+        const doubleTapDistance = 28;
         const clearLongPress = () => {
             if (longPressTimer) {
                 clearTimeout(longPressTimer);
                 longPressTimer = 0;
             }
         };
+        const isSelectionChromeTarget = (target) => (
+            !!target?.closest?.(
+                '.mobile-terminal-selection-menu, .mobile-terminal-selection-handles'
+            )
+        );
+        const isNearbyTap = (touch, now) => (
+            now - lastTapAt <= doubleTapDelay
+            && Math.abs(touch.clientX - lastTapX) <= doubleTapDistance
+            && Math.abs(touch.clientY - lastTapY) <= doubleTapDistance
+        );
         const onTouchStart = (event) => {
             const touch = event.touches[0];
             if (!touch || event.touches.length !== 1) return;
-            if (event.target.closest?.('.mobile-terminal-selection-menu')) return;
+            if (isSelectionChromeTarget(event.target)) return;
             longPressFired = false;
             startX = touch.clientX;
             startY = touch.clientY;
@@ -13461,17 +13490,60 @@ class Session {
             event.stopPropagation();
             longPressFired = false;
         };
+        const onTapEnd = (event) => {
+            if (longPressFired || isSelectionChromeTarget(event.target)) return;
+            const touch = event.changedTouches?.[0];
+            if (!touch || !this.mobileTerminalSelection) {
+                lastTapAt = 0;
+                return;
+            }
+            const moved = Math.abs(touch.clientX - startX) > moveThreshold
+                || Math.abs(touch.clientY - startY) > moveThreshold;
+            if (moved) {
+                lastTapAt = 0;
+                return;
+            }
+            const now = Date.now();
+            const shouldClear = isNearbyTap(touch, now)
+                && !this.isTerminalPointInMobileSelection(
+                    touch.clientX,
+                    touch.clientY
+                );
+            lastTapAt = now;
+            lastTapX = touch.clientX;
+            lastTapY = touch.clientY;
+            if (!shouldClear) return;
+            event.preventDefault();
+            event.stopPropagation();
+            lastTapAt = 0;
+            this.clearMobileTerminalSelection();
+        };
+        const onDoubleClick = (event) => {
+            if (!this.mobileTerminalSelection || isSelectionChromeTarget(event.target)) {
+                return;
+            }
+            if (this.isTerminalPointInMobileSelection(event.clientX, event.clientY)) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            this.clearMobileTerminalSelection();
+        };
         const onScroll = () => this.updateMobileTerminalSelectionControls();
         root.addEventListener('touchstart', onTouchStart, { passive: true });
         root.addEventListener('touchmove', onTouchMove, { passive: true });
+        root.addEventListener('touchend', onTapEnd, { passive: false });
         root.addEventListener('touchend', onTouchEnd, { passive: false });
         root.addEventListener('touchcancel', clearLongPress, { passive: true });
+        root.addEventListener('dblclick', onDoubleClick, true);
         const scrollDisposable = this.mainTerm.onScroll(onScroll);
         this.boundMobileTerminalSelectionRoot = root;
         this.boundMobileTerminalSelectionHandlers = {
             onTouchStart,
             onTouchMove,
+            onTapEnd,
             onTouchEnd,
+            onDoubleClick,
             clearLongPress,
             scrollDisposable
         };
@@ -13483,14 +13555,15 @@ class Session {
         if (root && handlers) {
             root.removeEventListener('touchstart', handlers.onTouchStart);
             root.removeEventListener('touchmove', handlers.onTouchMove);
+            root.removeEventListener('touchend', handlers.onTapEnd);
             root.removeEventListener('touchend', handlers.onTouchEnd);
             root.removeEventListener('touchcancel', handlers.clearLongPress);
+            root.removeEventListener('dblclick', handlers.onDoubleClick, true);
             handlers.scrollDisposable?.dispose?.();
         }
         this.boundMobileTerminalSelectionRoot = null;
         this.boundMobileTerminalSelectionHandlers = null;
-        this.mobileTerminalSelection = null;
-        this.hideMobileTerminalSelectionMenu();
+        this.clearMobileTerminalSelection();
     }
 
     reportResize() {
