@@ -167,8 +167,8 @@
 
 /* Make search selection highly visible. */
 .xterm .xterm-selection div {
-    background-color: #ffffff !important;
-    mix-blend-mode: difference;
+    background-color: rgba(42, 100, 115, 0.95) !important;
+    outline: 1px solid rgba(253, 246, 227, 0.18);
     opacity: 1 !important;
 }
 
@@ -994,7 +994,7 @@ body.soft-keyboard-open .app-layout {
     width: 100%;
     height: 100%;
     flex-grow: 1;
-    touch-action: none;
+    touch-action: pan-y;
     overflow: hidden;
     /* Ensure xterm canvas doesn't overflow */
     /* margin-top removed since we have padding now */

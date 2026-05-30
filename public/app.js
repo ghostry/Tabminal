@@ -227,7 +227,8 @@ const MAIN_TERMINAL_THEME = {
     foreground: '#839496',
     cursor: '#93a1a1',
     cursorAccent: '#002b36',
-    selectionBackground: '#073642',
+    selectionBackground: '#2a6473',
+    selectionForeground: '#fdf6e3',
     overviewRulerBorder: '#073642'
 };
 const TERMINAL_SEARCH_DECORATIONS = {
@@ -12214,6 +12215,12 @@ class Session {
         this.boundTerminalClaimRoot = null;
         this.boundTerminalClaimTextarea = null;
         this.boundTerminalClaimHandler = null;
+        this.boundMobileTerminalSelectionRoot = null;
+        this.boundMobileTerminalSelectionHandlers = null;
+        this.mobileTerminalSelection = null;
+        this.mobileTerminalSelectionHandles = null;
+        this.mobileTerminalSelectionMenu = null;
+        this.mobileTerminalDragPreview = null;
         this.wrapperElement = null;
         this.connectPromise = null;
         this._createTerminals();
@@ -13068,11 +13075,13 @@ class Session {
         this.boundTerminalClaimRoot = root;
         this.boundTerminalClaimTextarea = textarea;
         this.boundTerminalClaimHandler = handler;
+        this.bindMobileTerminalSelection();
     }
 
     unbindTerminalControlClaim() {
         const handler = this.boundTerminalClaimHandler;
         if (!handler) {
+            this.unbindMobileTerminalSelection();
             return;
         }
 
@@ -13100,6 +13109,388 @@ class Session {
         this.boundTerminalClaimRoot = null;
         this.boundTerminalClaimTextarea = null;
         this.boundTerminalClaimHandler = null;
+        this.unbindMobileTerminalSelection();
+    }
+
+    getTerminalScreenRect() {
+        const root = this.mainTerm?.element;
+        return root?.querySelector('.xterm-screen')?.getBoundingClientRect()
+            || root?.querySelector('.xterm-rows')?.getBoundingClientRect()
+            || root?.getBoundingClientRect()
+            || null;
+    }
+
+    getTerminalCellMetrics() {
+        const rect = this.getTerminalScreenRect();
+        if (!rect || !this.mainTerm?.cols || !this.mainTerm?.rows) return null;
+        return {
+            rect,
+            width: rect.width / this.mainTerm.cols,
+            height: rect.height / this.mainTerm.rows
+        };
+    }
+
+    getTerminalPositionAtClientPoint(clientX, clientY) {
+        const metrics = this.getTerminalCellMetrics();
+        const buffer = this.mainTerm?.buffer?.active;
+        if (!metrics || !buffer) return null;
+        const col = Math.max(0, Math.min(
+            this.mainTerm.cols - 1,
+            Math.floor((clientX - metrics.rect.left) / metrics.width)
+        ));
+        const viewportRow = Math.max(0, Math.min(
+            this.mainTerm.rows - 1,
+            Math.floor((clientY - metrics.rect.top) / metrics.height)
+        ));
+        return {
+            col,
+            row: buffer.viewportY + viewportRow
+        };
+    }
+
+    compareTerminalPositions(left, right) {
+        if (left.row !== right.row) return left.row - right.row;
+        return left.col - right.col;
+    }
+
+    getTerminalLineText(row) {
+        return this.mainTerm?.buffer?.active?.getLine(row)?.translateToString(true)
+            || '';
+    }
+
+    getTerminalSelectionLength(start, end) {
+        if (!this.mainTerm || !start || !end) return 0;
+        if (this.compareTerminalPositions(start, end) >= 0) return 0;
+        if (start.row === end.row) return end.col - start.col;
+        return (this.mainTerm.cols - start.col)
+            + ((end.row - start.row - 1) * this.mainTerm.cols)
+            + end.col;
+    }
+
+    setMobileTerminalSelection(startPosition, endPosition) {
+        if (!this.mainTerm || !startPosition || !endPosition) return false;
+        let start = startPosition;
+        let end = endPosition;
+        if (this.compareTerminalPositions(start, end) > 0) {
+            start = endPosition;
+            end = startPosition;
+        }
+        const length = this.getTerminalSelectionLength(start, end);
+        if (length <= 0) return false;
+
+        this.mobileTerminalSelection = { start, end };
+        this.mainTerm.select(start.col, start.row, length);
+        this.updateMobileTerminalSelectionControls();
+        return true;
+    }
+
+    selectMobileTerminalWordAt(clientX, clientY) {
+        const position = this.getTerminalPositionAtClientPoint(clientX, clientY);
+        if (!position) return false;
+        const line = this.getTerminalLineText(position.row);
+        if (!line) return false;
+
+        let startCol = Math.min(position.col, Math.max(0, line.length - 1));
+        let endCol = startCol + 1;
+        const isWord = (char) => /[\w./:@-]/.test(char || '');
+        if (isWord(line[startCol])) {
+            while (startCol > 0 && isWord(line[startCol - 1])) startCol -= 1;
+            while (endCol < line.length && isWord(line[endCol])) endCol += 1;
+        }
+        return this.setMobileTerminalSelection(
+            { col: startCol, row: position.row },
+            { col: endCol, row: position.row }
+        );
+    }
+
+    getTerminalHandlePoint(position, isEndHandle = false) {
+        const metrics = this.getTerminalCellMetrics();
+        const buffer = this.mainTerm?.buffer?.active;
+        if (!metrics || !buffer || !position) return null;
+        const viewportRow = position.row - buffer.viewportY;
+        if (viewportRow < 0 || viewportRow >= this.mainTerm.rows) return null;
+        return {
+            x: metrics.rect.left + (position.col * metrics.width),
+            y: metrics.rect.top + ((viewportRow + (isEndHandle ? 1 : -2))
+                * metrics.height)
+        };
+    }
+
+    hideMobileTerminalSelectionMenu(options = {}) {
+        this.mobileTerminalSelectionMenu?.remove();
+        this.mobileTerminalSelectionMenu = null;
+        if (!options.keepHandles) {
+            this.hideMobileTerminalSelectionHandles();
+        }
+    }
+
+    hideMobileTerminalSelectionHandles() {
+        this.mobileTerminalSelectionHandles?.remove();
+        this.mobileTerminalSelectionHandles = null;
+        this.hideMobileTerminalDragPreview();
+    }
+
+    hideMobileTerminalDragPreview() {
+        this.mobileTerminalDragPreview?.remove();
+        this.mobileTerminalDragPreview = null;
+    }
+
+    updateMobileTerminalDragPreview(clientX, clientY, position) {
+        if (!IS_MOBILE || !position) return;
+        if (!this.mobileTerminalDragPreview) {
+            const preview = document.createElement('div');
+            preview.className = 'mobile-editor-drag-preview mobile-terminal-drag-preview';
+            document.body.appendChild(preview);
+            this.mobileTerminalDragPreview = preview;
+        }
+
+        const line = this.getTerminalLineText(position.row);
+        const startIndex = Math.max(0, position.col - 8);
+        const endIndex = Math.min(line.length, position.col + 9);
+        const before = line.slice(startIndex, position.col);
+        const current = line.slice(position.col, position.col + 1) || ' ';
+        const after = line.slice(position.col + 1, endIndex);
+
+        this.mobileTerminalDragPreview.replaceChildren();
+        const snippet = document.createElement('div');
+        snippet.className = 'mobile-editor-drag-preview-snippet';
+        const beforeEl = document.createElement('span');
+        beforeEl.textContent = before;
+        const currentEl = document.createElement('strong');
+        currentEl.textContent = current;
+        const afterEl = document.createElement('span');
+        afterEl.textContent = after;
+        snippet.append(beforeEl, currentEl, afterEl);
+
+        const meta = document.createElement('div');
+        meta.className = 'mobile-editor-drag-preview-meta';
+        meta.textContent = `${position.row + 1}:${position.col + 1}`;
+        this.mobileTerminalDragPreview.append(snippet, meta);
+        this.mobileTerminalDragPreview.style.left = `${Math.round(clientX)}px`;
+        this.mobileTerminalDragPreview.style.top = `${Math.round(clientY - 76)}px`;
+    }
+
+    updateMobileTerminalSelectionControls() {
+        if (!IS_MOBILE || !this.mobileTerminalSelectionHandles) return;
+        const selection = this.mobileTerminalSelection;
+        if (!selection) {
+            this.hideMobileTerminalSelectionMenu();
+            return;
+        }
+        const startPoint = this.getTerminalHandlePoint(selection.start, false);
+        const endPoint = this.getTerminalHandlePoint(selection.end, true);
+        const startHandle = this.mobileTerminalSelectionHandles.querySelector(
+            '[data-handle="start"]'
+        );
+        const endHandle = this.mobileTerminalSelectionHandles.querySelector(
+            '[data-handle="end"]'
+        );
+        const placeHandle = (handle, point) => {
+            if (!handle || !point) {
+                handle?.classList.add('is-hidden');
+                return;
+            }
+            handle.classList.remove('is-hidden');
+            handle.style.left = `${Math.round(point.x)}px`;
+            handle.style.top = `${Math.round(point.y)}px`;
+        };
+        placeHandle(startHandle, startPoint);
+        placeHandle(endHandle, endPoint);
+    }
+
+    showMobileTerminalSelectionHandles() {
+        if (!IS_MOBILE || !this.mobileTerminalSelection) return;
+        if (!this.mobileTerminalSelectionHandles) {
+            const layer = document.createElement('div');
+            layer.className = 'mobile-editor-selection-handles mobile-terminal-selection-handles';
+            const makeHandle = (type) => {
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = `mobile-editor-selection-handle mobile-terminal-selection-handle ${type}`;
+                handle.dataset.handle = type;
+                handle.setAttribute('aria-label', type === 'start' ? '调整选区开头' : '调整选区结尾');
+                handle.addEventListener('pointerdown', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.hideMobileTerminalSelectionMenu({ keepHandles: true });
+                    handle.setPointerCapture?.(event.pointerId);
+                    const initialSelection = this.mobileTerminalSelection;
+                    if (!initialSelection) return;
+                    const fixedPosition = type === 'start'
+                        ? initialSelection.end
+                        : initialSelection.start;
+                    const movingPosition = type === 'start'
+                        ? initialSelection.start
+                        : initialSelection.end;
+                    this.updateMobileTerminalDragPreview(
+                        event.clientX,
+                        event.clientY,
+                        movingPosition
+                    );
+
+                    const onPointerMove = (moveEvent) => {
+                        moveEvent.preventDefault();
+                        const nextPosition = this.getTerminalPositionAtClientPoint(
+                            moveEvent.clientX,
+                            moveEvent.clientY
+                        );
+                        if (!nextPosition) return;
+                        this.updateMobileTerminalDragPreview(
+                            moveEvent.clientX,
+                            moveEvent.clientY,
+                            nextPosition
+                        );
+                        if (type === 'start') {
+                            this.setMobileTerminalSelection(nextPosition, fixedPosition);
+                        } else {
+                            this.setMobileTerminalSelection(fixedPosition, nextPosition);
+                        }
+                    };
+                    const onPointerUp = (upEvent) => {
+                        upEvent.preventDefault();
+                        document.removeEventListener('pointermove', onPointerMove, true);
+                        document.removeEventListener('pointerup', onPointerUp, true);
+                        document.removeEventListener('pointercancel', onPointerUp, true);
+                        this.hideMobileTerminalDragPreview();
+                        this.showMobileTerminalSelectionMenu();
+                    };
+                    document.addEventListener('pointermove', onPointerMove, true);
+                    document.addEventListener('pointerup', onPointerUp, true);
+                    document.addEventListener('pointercancel', onPointerUp, true);
+                });
+                layer.appendChild(handle);
+            };
+            makeHandle('start');
+            makeHandle('end');
+            document.body.appendChild(layer);
+            this.mobileTerminalSelectionHandles = layer;
+        }
+        this.updateMobileTerminalSelectionControls();
+    }
+
+    showMobileTerminalSelectionMenu() {
+        if (!IS_MOBILE || !this.mobileTerminalSelection) return;
+        this.hideMobileTerminalSelectionMenu();
+        const menu = document.createElement('div');
+        menu.className = 'mobile-editor-selection-menu mobile-terminal-selection-menu';
+        menu.setAttribute('role', 'menu');
+        const makeButton = (label, action) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void action();
+            });
+            menu.appendChild(button);
+        };
+        makeButton('复制', async () => {
+            const text = this.mainTerm?.getSelection?.() || '';
+            if (!text) return;
+            try {
+                await navigator.clipboard.writeText(text);
+                alert('已复制选中文本', { type: 'success' });
+            } catch (error) {
+                alert(error.message || '复制失败', {
+                    title: '复制失败',
+                    type: 'error'
+                });
+            }
+            this.hideMobileTerminalSelectionMenu();
+        });
+        makeButton('全选', () => {
+            this.mainTerm?.selectAll?.();
+            this.mobileTerminalSelection = null;
+            this.hideMobileTerminalSelectionMenu();
+        });
+        document.body.appendChild(menu);
+        this.mobileTerminalSelectionMenu = menu;
+        this.showMobileTerminalSelectionHandles();
+    }
+
+    bindMobileTerminalSelection() {
+        this.unbindMobileTerminalSelection();
+        if (!IS_MOBILE || !this.mainTerm?.element) return;
+
+        const root = this.mainTerm.element;
+        let longPressTimer = 0;
+        let longPressFired = false;
+        let startX = 0;
+        let startY = 0;
+        const moveThreshold = 8;
+        const clearLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = 0;
+            }
+        };
+        const onTouchStart = (event) => {
+            const touch = event.touches[0];
+            if (!touch || event.touches.length !== 1) return;
+            if (event.target.closest?.('.mobile-terminal-selection-menu')) return;
+            longPressFired = false;
+            startX = touch.clientX;
+            startY = touch.clientY;
+            clearLongPress();
+            longPressTimer = window.setTimeout(() => {
+                longPressTimer = 0;
+                if (!this.isMainTerminalVisible()) return;
+                if (!this.selectMobileTerminalWordAt(startX, startY)) return;
+                longPressFired = true;
+                this.showMobileTerminalSelectionMenu();
+            }, 560);
+        };
+        const onTouchMove = (event) => {
+            const touch = event.touches[0];
+            if (!touch) {
+                clearLongPress();
+                return;
+            }
+            if (
+                Math.abs(touch.clientX - startX) > moveThreshold
+                || Math.abs(touch.clientY - startY) > moveThreshold
+            ) {
+                clearLongPress();
+            }
+        };
+        const onTouchEnd = (event) => {
+            clearLongPress();
+            if (!longPressFired) return;
+            event.preventDefault();
+            event.stopPropagation();
+            longPressFired = false;
+        };
+        const onScroll = () => this.updateMobileTerminalSelectionControls();
+        root.addEventListener('touchstart', onTouchStart, { passive: true });
+        root.addEventListener('touchmove', onTouchMove, { passive: true });
+        root.addEventListener('touchend', onTouchEnd, { passive: false });
+        root.addEventListener('touchcancel', clearLongPress, { passive: true });
+        const scrollDisposable = this.mainTerm.onScroll(onScroll);
+        this.boundMobileTerminalSelectionRoot = root;
+        this.boundMobileTerminalSelectionHandlers = {
+            onTouchStart,
+            onTouchMove,
+            onTouchEnd,
+            clearLongPress,
+            scrollDisposable
+        };
+    }
+
+    unbindMobileTerminalSelection() {
+        const root = this.boundMobileTerminalSelectionRoot;
+        const handlers = this.boundMobileTerminalSelectionHandlers;
+        if (root && handlers) {
+            root.removeEventListener('touchstart', handlers.onTouchStart);
+            root.removeEventListener('touchmove', handlers.onTouchMove);
+            root.removeEventListener('touchend', handlers.onTouchEnd);
+            root.removeEventListener('touchcancel', handlers.clearLongPress);
+            handlers.scrollDisposable?.dispose?.();
+        }
+        this.boundMobileTerminalSelectionRoot = null;
+        this.boundMobileTerminalSelectionHandlers = null;
+        this.mobileTerminalSelection = null;
+        this.hideMobileTerminalSelectionMenu();
     }
 
     reportResize() {

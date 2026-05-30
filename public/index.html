@@ -385,6 +385,10 @@
                 return;
             }
 
+            if (target && target.closest && target.closest('.xterm')) {
+                return;
+            }
+
             while (target && target !== document.body) {
                 if (target.classList && (
                     target.classList.contains('tab-list') ||
