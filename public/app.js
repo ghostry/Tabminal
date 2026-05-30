@@ -152,6 +152,7 @@ const AGENT_TRANSCRIPT_INITIAL_VISIBLE_BLOCKS = 30;
 const AGENT_TRANSCRIPT_WINDOW_STEP = 10;
 const AGENT_TRANSCRIPT_FOLLOW_LATEST_TOLERANCE = 5;
 const HOST_SOCKET_RECONNECT_MS = 5000;
+const HOST_SOCKET_FULL_SYNC_DISCONNECT_MS = 20_000;
 const AGENT_TRANSCRIPT_RENDER_DEBOUNCE_MS = 300;
 const WORKSPACE_TAB_TITLE_MAX_LENGTH = 20;
 const MAIN_SERVER_ID = 'main';
@@ -1174,6 +1175,7 @@ class HostSocket {
         this.fileVersionWatches = new Set();
         this.reconnectTimer = null;
         this.manualClose = false;
+        this.disconnectedSince = 0;
     }
 
     get readyState() {
@@ -1231,6 +1233,7 @@ class HostSocket {
                 if (this.manualClose) {
                     return;
                 }
+                this.markDisconnected();
                 setStatus(this.server, 'reconnecting');
                 updateServerControlMetric(this.server);
                 this.scheduleReconnect();
@@ -1240,6 +1243,7 @@ class HostSocket {
                 if (this.manualClose) {
                     return;
                 }
+                this.markDisconnected();
                 setStatus(this.server, 'reconnecting');
                 this.scheduleReconnect();
             });
@@ -1257,6 +1261,12 @@ class HostSocket {
             this.connectPromise = null;
         });
         return this.connectPromise;
+    }
+
+    markDisconnected() {
+        if (!this.disconnectedSince) {
+            this.disconnectedSince = Date.now();
+        }
     }
 
     clearReconnectTimer() {
@@ -1513,6 +1523,10 @@ class HostSocket {
     }
 
     handleHello(message) {
+        const disconnectedForMs = this.disconnectedSince
+            ? Date.now() - this.disconnectedSince
+            : 0;
+        this.disconnectedSince = 0;
         this.helloResolved = true;
         this.clearReconnectTimer();
         this.server.nextSyncAt = 0;
@@ -1524,7 +1538,19 @@ class HostSocket {
             this.handleSystemStats(message.system);
         }
         reconcileSessions(this.server, message.sessions || []);
-        void this.applyAgentState(message.agents);
+        const applyAgentStatePromise = this.applyAgentState(message.agents);
+        if (disconnectedForMs >= HOST_SOCKET_FULL_SYNC_DISCONNECT_MS) {
+            void applyAgentStatePromise
+                .then(() => recoverServerAfterLongDisconnect(this.server))
+                .catch((error) => {
+                    console.warn(
+                        'Failed to recover host data after reconnect:',
+                        error
+                    );
+                });
+        } else {
+            void applyAgentStatePromise;
+        }
         this.helloResolve?.(true);
         this.helloResolve = null;
     }
@@ -1594,6 +1620,7 @@ class HostSocket {
         }
         this.socket = null;
         this.helloResolved = false;
+        this.disconnectedSince = 0;
     }
 }
 
@@ -6247,6 +6274,492 @@ class EditorManager {
         this.setEditorWordWrapEnabled(!this.editorWordWrapEnabled);
     }
 
+    getActiveEditorSelectedText() {
+        if (!this.editor) return '';
+        const model = this.editor.getModel?.();
+        const selection = this.editor.getSelection?.();
+        if (!model || !selection || selection.isEmpty?.()) return '';
+        return model.getValueInRange(selection) || '';
+    }
+
+    async copyActiveEditorSelection(label = '已复制选中文本') {
+        const text = this.getActiveEditorSelectedText();
+        if (!text) return false;
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                textarea.remove();
+            }
+            alert(label, { type: 'success' });
+            return true;
+        } catch (error) {
+            alert(error.message || '复制失败', {
+                title: '复制失败',
+                type: 'error'
+            });
+            return false;
+        }
+    }
+
+    selectEditorWordAtClientPoint(clientX, clientY) {
+        if (!this.editor || !this.monacoInstance) return false;
+        const target = this.editor.getTargetAtClientPoint?.(clientX, clientY);
+        const position = target?.position;
+        const model = this.editor.getModel?.();
+        if (!position || !model) return false;
+
+        this.editor.focus();
+
+        const word = model.getWordAtPosition(position);
+        if (word) {
+            this.editor.setSelection(new this.monacoInstance.Selection(
+                position.lineNumber,
+                word.startColumn,
+                position.lineNumber,
+                word.endColumn
+            ));
+            return true;
+        }
+
+        const lineMaxColumn = model.getLineMaxColumn(position.lineNumber);
+        const startColumn = Math.max(1, Math.min(position.column, lineMaxColumn - 1));
+        const endColumn = Math.min(lineMaxColumn, startColumn + 1);
+        if (endColumn <= startColumn) {
+            this.editor.setPosition(position);
+            return false;
+        }
+        this.editor.setSelection(new this.monacoInstance.Selection(
+            position.lineNumber,
+            startColumn,
+            position.lineNumber,
+            endColumn
+        ));
+        return true;
+    }
+
+    hideMobileEditorSelectionMenu(options = {}) {
+        this.mobileEditorSelectionMenu?.remove();
+        this.mobileEditorSelectionMenu = null;
+        if (!options.keepHandles) {
+            this.hideMobileEditorSelectionHandles();
+        }
+    }
+
+    hideMobileEditorSelectionHandles() {
+        this.mobileEditorSelectionHandles?.remove();
+        this.mobileEditorSelectionHandles = null;
+        this.hideMobileEditorDragPreview();
+    }
+
+    hideMobileEditorDragPreview() {
+        this.mobileEditorDragPreview?.remove();
+        this.mobileEditorDragPreview = null;
+    }
+
+    updateMobileEditorDragPreview(clientX, clientY, position) {
+        if (!IS_MOBILE || !this.editor || !position) return;
+        if (!this.mobileEditorDragPreview) {
+            const preview = document.createElement('div');
+            preview.className = 'mobile-editor-drag-preview';
+            document.body.appendChild(preview);
+            this.mobileEditorDragPreview = preview;
+        }
+
+        const model = this.editor.getModel?.();
+        const line = model?.getLineContent(position.lineNumber) || '';
+        const startIndex = Math.max(0, position.column - 9);
+        const endIndex = Math.min(line.length, position.column + 8);
+        const before = line.slice(startIndex, Math.max(0, position.column - 1));
+        const current = line.slice(
+            Math.max(0, position.column - 1),
+            Math.max(0, position.column)
+        ) || ' ';
+        const after = line.slice(Math.max(0, position.column), endIndex);
+
+        this.mobileEditorDragPreview.replaceChildren();
+        const snippet = document.createElement('div');
+        snippet.className = 'mobile-editor-drag-preview-snippet';
+
+        const beforeEl = document.createElement('span');
+        beforeEl.textContent = before;
+        const currentEl = document.createElement('strong');
+        currentEl.textContent = current;
+        const afterEl = document.createElement('span');
+        afterEl.textContent = after;
+        snippet.append(beforeEl, currentEl, afterEl);
+
+        const meta = document.createElement('div');
+        meta.className = 'mobile-editor-drag-preview-meta';
+        meta.textContent = `${position.lineNumber}:${position.column}`;
+
+        this.mobileEditorDragPreview.append(snippet, meta);
+        this.mobileEditorDragPreview.style.left = `${Math.round(clientX)}px`;
+        this.mobileEditorDragPreview.style.top = `${Math.round(clientY - 76)}px`;
+    }
+
+    compareEditorPositions(left, right) {
+        if (left.lineNumber !== right.lineNumber) {
+            return left.lineNumber - right.lineNumber;
+        }
+        return left.column - right.column;
+    }
+
+    getEditorPositionAtClientPoint(clientX, clientY) {
+        const target = this.editor?.getTargetAtClientPoint?.(clientX, clientY);
+        return target?.position || null;
+    }
+
+    setMobileEditorSelectionRange(startPosition, endPosition) {
+        if (!this.editor || !this.monacoInstance || !startPosition || !endPosition) {
+            return;
+        }
+
+        let start = startPosition;
+        let end = endPosition;
+        if (this.compareEditorPositions(start, end) > 0) {
+            start = endPosition;
+            end = startPosition;
+        }
+        if (this.compareEditorPositions(start, end) === 0) return;
+
+        this.editor.setSelection(new this.monacoInstance.Selection(
+            start.lineNumber,
+            start.column,
+            end.lineNumber,
+            end.column
+        ));
+        this.updateMobileEditorSelectionControls();
+    }
+
+    getMobileEditorHandleCoordinates(position, isEndHandle = false) {
+        if (!this.editor || !this.monacoContainer || !position) return null;
+        const visiblePosition = this.editor.getScrolledVisiblePosition?.(position);
+        if (!visiblePosition) return null;
+
+        const editorRect = this.monacoContainer.getBoundingClientRect();
+        const scaleX = this.monacoContainer.offsetWidth > 0
+            ? editorRect.width / this.monacoContainer.offsetWidth
+            : 1;
+        const scaleY = this.monacoContainer.offsetHeight > 0
+            ? editorRect.height / this.monacoContainer.offsetHeight
+            : 1;
+        return {
+            x: editorRect.left + (visiblePosition.left * scaleX),
+            y: editorRect.top + ((isEndHandle
+                ? visiblePosition.top + visiblePosition.height
+                : visiblePosition.top - visiblePosition.height) * scaleY),
+            hidden:
+                visiblePosition.top < 0
+                || (visiblePosition.top * scaleY) > editorRect.height
+                || (isEndHandle && visiblePosition.left < 0)
+        };
+    }
+
+    updateMobileEditorSelectionControls() {
+        if (!IS_MOBILE || !this.editor || !this.mobileEditorSelectionHandles) {
+            return;
+        }
+
+        const selection = this.editor.getSelection?.();
+        if (!selection || selection.isEmpty?.()) {
+            this.hideMobileEditorSelectionMenu();
+            return;
+        }
+
+        const start = selection.getStartPosition();
+        const end = selection.getEndPosition();
+        const startPoint = this.getMobileEditorHandleCoordinates(start);
+        const endPoint = this.getMobileEditorHandleCoordinates(end, true);
+        const startHandle = this.mobileEditorSelectionHandles.querySelector(
+            '[data-handle="start"]'
+        );
+        const endHandle = this.mobileEditorSelectionHandles.querySelector(
+            '[data-handle="end"]'
+        );
+
+        const placeHandle = (handle, point) => {
+            if (!handle || !point || point.hidden) {
+                handle?.classList.add('is-hidden');
+                return;
+            }
+            handle.classList.remove('is-hidden');
+            handle.style.left = `${Math.round(point.x)}px`;
+            handle.style.top = `${Math.round(point.y)}px`;
+        };
+
+        placeHandle(startHandle, startPoint);
+        placeHandle(endHandle, endPoint);
+    }
+
+    showMobileEditorSelectionHandles() {
+        if (!IS_MOBILE || !this.editor || !this.getActiveEditorSelectedText()) {
+            return;
+        }
+
+        if (!this.mobileEditorSelectionHandles) {
+            const layer = document.createElement('div');
+            layer.className = 'mobile-editor-selection-handles';
+
+            const makeHandle = (type) => {
+                const handle = document.createElement('button');
+                handle.type = 'button';
+                handle.className = `mobile-editor-selection-handle ${type}`;
+                handle.dataset.handle = type;
+                handle.setAttribute('aria-label', type === 'start' ? '调整选区开头' : '调整选区结尾');
+                handle.addEventListener('pointerdown', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.hideMobileEditorSelectionMenu({ keepHandles: true });
+                    handle.setPointerCapture?.(event.pointerId);
+
+                    const initialSelection = this.editor.getSelection?.();
+                    if (!initialSelection) return;
+                    const fixedPosition = type === 'start'
+                        ? initialSelection.getEndPosition()
+                        : initialSelection.getStartPosition();
+                    const initialMovingPosition = type === 'start'
+                        ? initialSelection.getStartPosition()
+                        : initialSelection.getEndPosition();
+                    this.updateMobileEditorDragPreview(
+                        event.clientX,
+                        event.clientY,
+                        initialMovingPosition
+                    );
+
+                    const onPointerMove = (moveEvent) => {
+                        moveEvent.preventDefault();
+                        const nextPosition = this.getEditorPositionAtClientPoint(
+                            moveEvent.clientX,
+                            moveEvent.clientY
+                        );
+                        if (!nextPosition) return;
+                        this.updateMobileEditorDragPreview(
+                            moveEvent.clientX,
+                            moveEvent.clientY,
+                            nextPosition
+                        );
+                        if (type === 'start') {
+                            this.setMobileEditorSelectionRange(
+                                nextPosition,
+                                fixedPosition
+                            );
+                        } else {
+                            this.setMobileEditorSelectionRange(
+                                fixedPosition,
+                                nextPosition
+                            );
+                        }
+                    };
+                    const onPointerUp = (upEvent) => {
+                        upEvent.preventDefault();
+                        document.removeEventListener('pointermove', onPointerMove, true);
+                        document.removeEventListener('pointerup', onPointerUp, true);
+                        document.removeEventListener('pointercancel', onPointerUp, true);
+                        this.hideMobileEditorDragPreview();
+                        this.showMobileEditorSelectionMenu();
+                    };
+
+                    document.addEventListener('pointermove', onPointerMove, true);
+                    document.addEventListener('pointerup', onPointerUp, true);
+                    document.addEventListener('pointercancel', onPointerUp, true);
+                });
+                layer.appendChild(handle);
+            };
+
+            makeHandle('start');
+            makeHandle('end');
+            document.body.appendChild(layer);
+            this.mobileEditorSelectionHandles = layer;
+        }
+
+        this.updateMobileEditorSelectionControls();
+    }
+
+    showMobileEditorSelectionMenu() {
+        if (!IS_MOBILE || !this.editor || !this.getActiveEditorSelectedText()) {
+            return;
+        }
+
+        this.hideMobileEditorSelectionMenu();
+        const menu = document.createElement('div');
+        menu.className = 'mobile-editor-selection-menu';
+        menu.setAttribute('role', 'menu');
+
+        const makeButton = (label, action) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void action();
+            });
+            menu.appendChild(button);
+        };
+
+        makeButton('复制', async () => {
+            await this.copyActiveEditorSelection();
+            this.hideMobileEditorSelectionMenu();
+        });
+        makeButton('剪切', async () => {
+            if (this.editor.getRawOptions?.().readOnly) return;
+            const copied = await this.copyActiveEditorSelection('已剪切选中文本');
+            const selection = this.editor.getSelection?.();
+            if (copied && selection) {
+                this.editor.executeEdits('mobile-selection-menu', [{
+                    range: selection,
+                    text: '',
+                    forceMoveMarkers: true
+                }]);
+            }
+            this.hideMobileEditorSelectionMenu();
+        });
+        makeButton('全选', () => {
+            this.editor.trigger('mobile-selection-menu', 'editor.action.selectAll', null);
+            this.showMobileEditorSelectionMenu();
+        });
+
+        document.body.appendChild(menu);
+        this.mobileEditorSelectionMenu = menu;
+        this.showMobileEditorSelectionHandles();
+    }
+
+    showMobileEditorContextMenu() {
+        if (!IS_MOBILE || !this.editor) return;
+        this.hideMobileEditorSelectionMenu();
+        this.editor.focus();
+        this.editor.updateOptions({ contextmenu: true });
+        this.editor.trigger(
+            'tabminal-mobile-long-press',
+            'editor.action.showContextMenu',
+            null
+        );
+        window.setTimeout(() => {
+            this.editor?.updateOptions({ contextmenu: false });
+        }, 0);
+    }
+
+    setupMobileEditorContextMenu() {
+        if (!IS_MOBILE || !this.editor || !this.monacoContainer) return;
+
+        let longPressTimer = 0;
+        let longPressFired = false;
+        let touchStartedOnText = false;
+        let longPressStartX = 0;
+        let longPressStartY = 0;
+        const longPressMoveThreshold = 8;
+
+        const clearLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = 0;
+            }
+        };
+
+        const isTextTouchTarget = (eventTarget, clientX, clientY) => {
+            const target = this.editor.getTargetAtClientPoint?.(clientX, clientY);
+            const targetTypes = this.monacoInstance?.editor?.MouseTargetType || {};
+            if (target?.type === targetTypes.CONTENT_TEXT) return true;
+            if (target?.type === targetTypes.CONTENT_EMPTY) return false;
+            return !!eventTarget?.closest?.('.view-line span, .view-line');
+        };
+
+        const movePastThreshold = (touch) => (
+            Math.abs(touch.clientX - longPressStartX) > longPressMoveThreshold
+            || Math.abs(touch.clientY - longPressStartY) > longPressMoveThreshold
+        );
+
+        this.monacoContainer.addEventListener('contextmenu', (event) => {
+            if (!IS_MOBILE) return;
+            if (isTextTouchTarget(event.target, event.clientX, event.clientY)) {
+                return;
+            }
+            event.preventDefault();
+        }, { capture: true });
+
+        this.monacoContainer.addEventListener('touchstart', (event) => {
+            const touch = event.touches[0];
+            if (!touch || event.touches.length !== 1) return;
+            if (event.target.closest?.('.monaco-menu, .context-view')) return;
+
+            clearLongPress();
+            longPressFired = false;
+            longPressStartX = touch.clientX;
+            longPressStartY = touch.clientY;
+            touchStartedOnText = isTextTouchTarget(
+                event.target,
+                longPressStartX,
+                longPressStartY
+            );
+
+            longPressTimer = window.setTimeout(() => {
+                longPressTimer = 0;
+                if (
+                    touchStartedOnText
+                    && !this.getActiveEditorSelectedText().trim()
+                ) {
+                    this.selectEditorWordAtClientPoint(
+                        longPressStartX,
+                        longPressStartY
+                    );
+                }
+                longPressFired = true;
+                if (touchStartedOnText) {
+                    this.showMobileEditorSelectionMenu();
+                } else {
+                    this.showMobileEditorContextMenu();
+                }
+            }, 560);
+        }, { passive: true });
+
+        this.monacoContainer.addEventListener('touchmove', (event) => {
+            const touch = event.touches[0];
+            if (!touch || movePastThreshold(touch)) {
+                clearLongPress();
+            }
+        }, { passive: true });
+
+        this.monacoContainer.addEventListener('touchend', (event) => {
+            clearLongPress();
+            if (longPressFired) {
+                event.preventDefault();
+                event.stopPropagation();
+                longPressFired = false;
+                return;
+            }
+            if (!touchStartedOnText) return;
+            window.setTimeout(() => {
+                if (this.getActiveEditorSelectedText().trim()) {
+                    this.showMobileEditorSelectionMenu();
+                }
+            }, 120);
+        }, { passive: false });
+
+        this.monacoContainer.addEventListener('touchcancel', clearLongPress, {
+            passive: true
+        });
+
+        this.editor.onDidScrollChange(() => {
+            this.updateMobileEditorSelectionControls();
+        });
+        this.editor.onDidChangeCursorSelection(() => {
+            const selection = this.editor?.getSelection?.();
+            if (!selection || selection.isEmpty?.()) {
+                this.hideMobileEditorSelectionMenu();
+                return;
+            }
+            this.updateMobileEditorSelectionControls();
+        });
+    }
+
     initMonaco() {
         require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' }});
         require(['vs/editor/editor.main'], (monaco) => {
@@ -6256,6 +6769,7 @@ class EditorManager {
                 language: 'plaintext',
                 theme: 'solarized-dark',
                 automaticLayout: false,
+                contextmenu: !IS_MOBILE,
                 minimap: { enabled: true },
                 rulers: [80, 120],
                 fontSize: IS_MOBILE ? 14 : 12,
@@ -6312,6 +6826,7 @@ class EditorManager {
                     this.toggleEditorWordWrap();
                 }
             });
+            this.setupMobileEditorContextMenu();
             
             monaco.editor.defineTheme('solarized-dark', {
                 base: 'vs-dark',
@@ -6327,6 +6842,9 @@ class EditorManager {
                     'editor.background': '#002b36',
                     'editor.foreground': '#839496',
                     'editorCursor.foreground': '#93a1a1',
+                    'editor.selectionBackground': '#2a6473',
+                    'editor.inactiveSelectionBackground': '#1b4d5a',
+                    'editor.selectionHighlightBackground': '#2a647380',
                     'editor.lineHighlightBackground': '#073642',
                     'editorLineNumber.foreground': '#586e75',
                 }
@@ -12718,15 +13236,22 @@ class AgentTab {
 
     mergeTimelineWindow(data = {}) {
         if (Array.isArray(data.messages)) {
-            const seen = new Set(this.messages.map((message) =>
-                `${message.id || ''}:${message.streamKey || ''}`
-            ));
+            const indexes = new Map(this.messages.map((message, index) => [
+                `${message.id || ''}:${message.streamKey || ''}`,
+                index
+            ]));
             for (const message of data.messages) {
                 const normalized = this.#normalizeMessage(message);
                 const key = `${normalized.id || ''}:${normalized.streamKey || ''}`;
-                if (!seen.has(key)) {
+                if (indexes.has(key)) {
+                    const index = indexes.get(key);
+                    this.messages[index] = {
+                        ...this.messages[index],
+                        ...normalized
+                    };
+                } else {
+                    indexes.set(key, this.messages.length);
                     this.messages.push(normalized);
-                    seen.add(key);
                 }
             }
             this.messages.sort((left, right) =>
@@ -12734,20 +13259,34 @@ class AgentTab {
             );
         }
         for (const toolCall of data.toolCalls || []) {
-            if (toolCall?.toolCallId && !this.toolCalls.has(toolCall.toolCallId)) {
-                this.toolCalls.set(
-                    toolCall.toolCallId,
-                    this.#normalizeTimelineEntry(toolCall)
-                );
-            }
+            if (!toolCall?.toolCallId) continue;
+            const normalized = this.#normalizeTimelineEntry(toolCall);
+            const previous = this.toolCalls.get(toolCall.toolCallId) || {};
+            this.toolCalls.set(toolCall.toolCallId, {
+                ...previous,
+                ...normalized,
+                content: mergeAgentToolContentItems(
+                    previous.content,
+                    normalized.content
+                )
+            });
         }
         for (const permission of data.permissions || []) {
-            if (permission?.id && !this.permissions.has(permission.id)) {
-                this.permissions.set(
-                    permission.id,
-                    this.#normalizeTimelineEntry(permission)
-                );
-            }
+            if (!permission?.id) continue;
+            const normalized = this.#normalizeTimelineEntry(permission);
+            const previous = this.permissions.get(permission.id) || {};
+            this.permissions.set(permission.id, {
+                ...previous,
+                ...normalized,
+                toolCall: {
+                    ...(previous.toolCall || {}),
+                    ...(normalized.toolCall || {}),
+                    content: mergeAgentToolContentItems(
+                        previous.toolCall?.content,
+                        normalized.toolCall?.content
+                    )
+                }
+            });
         }
         if (Array.isArray(data.plan) && data.plan.length > 0) {
             const existing = new Set((this.planHistory || []).map((entry) =>
@@ -18060,6 +18599,49 @@ async function syncAgentsForServer(server, { force = false, full = false } = {})
     }
 
     finishAgentStateApply(server);
+}
+
+async function loadCompleteAgentTimeline(agentTab) {
+    if (!agentTab?.server?.isAuthenticated || !agentTab.id) return;
+    let before = Number.isFinite(agentTab.timelineWindowStart)
+        ? agentTab.timelineWindowStart
+        : 0;
+    while (before > 0 && agentTab.timelineWindowHasMoreBefore) {
+        const params = new URLSearchParams({
+            before: String(before),
+            limit: '200'
+        });
+        const response = await agentTab.server.fetch(
+            `/api/agents/tabs/${encodeURIComponent(agentTab.id)}/timeline?${params}`
+        );
+        if (!response.ok) {
+            await throwResponseError(response, 'Failed to load agent timeline');
+        }
+        const data = await response.json();
+        const previousBefore = before;
+        agentTab.mergeTimelineWindow(data);
+        before = Number.isFinite(agentTab.timelineWindowStart)
+            ? agentTab.timelineWindowStart
+            : 0;
+        if (before >= previousBefore) {
+            break;
+        }
+    }
+}
+
+async function recoverServerAfterLongDisconnect(server) {
+    if (!server || !server.isAuthenticated) return;
+    await syncAgentsForServer(server, { force: true, full: true });
+    for (const agentTab of getAgentTabsForServer(server.id)) {
+        await loadCompleteAgentTimeline(agentTab);
+    }
+    const activeAgentTab = getActiveAgentTab();
+    if (activeAgentTab?.serverId === server.id) {
+        activeAgentTab.notifyUi({
+            full: true,
+            authoritativeSync: true
+        });
+    }
 }
 
 async function createAgentTab(session, agentId, options = {}) {

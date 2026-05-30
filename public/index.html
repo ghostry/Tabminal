@@ -381,6 +381,10 @@
             let target = e.target;
             let scrollable = null;
 
+            if (target && target.closest && target.closest('.monaco-editor')) {
+                return;
+            }
+
             while (target && target !== document.body) {
                 if (target.classList && (
                     target.classList.contains('tab-list') ||
