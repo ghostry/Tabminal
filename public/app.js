@@ -160,6 +160,7 @@ const RUNTIME_BOOT_ID_STORAGE_KEY = 'tabminal_runtime_boot_id';
 const WORKSPACE_DEVICE_ID_STORAGE_KEY = 'tabminal_workspace_device_id';
 const RECENT_AGENT_USAGE_STORAGE_KEY = 'tabminal_recent_agent_usage';
 const FILE_WORKSPACE_TAB_PREFIX = 'file:';
+const DIFF_WORKSPACE_TAB_PREFIX = 'diff:';
 const MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX = 'markdown-preview:';
 const AGENT_WORKSPACE_TAB_PREFIX = 'agent:';
 const TERMINAL_WORKSPACE_TAB_KEY = 'terminal:main';
@@ -262,6 +263,10 @@ function makeFileWorkspaceTabKey(filePath) {
     return `${FILE_WORKSPACE_TAB_PREFIX}${filePath}`;
 }
 
+function makeDiffWorkspaceTabKey(filePath) {
+    return `${DIFF_WORKSPACE_TAB_PREFIX}${filePath}`;
+}
+
 function makeMarkdownPreviewWorkspaceTabKey(filePath) {
     return `${MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX}${filePath}`;
 }
@@ -285,6 +290,11 @@ function isFileWorkspaceTabKey(key) {
             key.startsWith(FILE_WORKSPACE_TAB_PREFIX)
             || key.startsWith(MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX)
         );
+}
+
+function isDiffWorkspaceTabKey(key) {
+    return typeof key === 'string'
+        && key.startsWith(DIFF_WORKSPACE_TAB_PREFIX);
 }
 
 function isMarkdownPreviewWorkspaceTabKey(key) {
@@ -563,6 +573,9 @@ function workspaceKeyToFilePath(key) {
     if (typeof key !== 'string' || key.length === 0) return '';
     if (key.startsWith(MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX)) {
         return key.slice(MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX.length);
+    }
+    if (key.startsWith(DIFF_WORKSPACE_TAB_PREFIX)) {
+        return key.slice(DIFF_WORKSPACE_TAB_PREFIX.length);
     }
     if (key.startsWith(FILE_WORKSPACE_TAB_PREFIX)) {
         return key.slice(FILE_WORKSPACE_TAB_PREFIX.length);
@@ -2512,6 +2525,11 @@ class EditorManager {
             ) {
                 return lastNonTerminal;
             }
+        } else if (isDiffWorkspaceTabKey(lastNonTerminal)) {
+            const filePath = workspaceKeyToFilePath(lastNonTerminal);
+            if (this.diffFiles.has(filePath)) {
+                return lastNonTerminal;
+            }
         }
 
         const activeFilePath = session.editorState.activeFilePath;
@@ -3133,6 +3151,12 @@ class EditorManager {
                         workspaceKeyToFilePath(explicitKey)
                     )
                 )
+            ) {
+                return explicitKey;
+            }
+            if (
+                isDiffWorkspaceTabKey(explicitKey)
+                && this.diffFiles.has(workspaceKeyToFilePath(explicitKey))
             ) {
                 return explicitKey;
             }
@@ -3843,7 +3867,7 @@ class EditorManager {
     }
 
     remapWorkspaceTabKey(key, oldPath, newPath, isDirectory) {
-        if (!isFileWorkspaceTabKey(key)) return key;
+        if (!isFileWorkspaceTabKey(key) && !isDiffWorkspaceTabKey(key)) return key;
         const filePath = workspaceKeyToFilePath(key);
         const nextPath = this.remapTreePath(
             filePath,
@@ -3853,6 +3877,9 @@ class EditorManager {
         );
         if (!nextPath) {
             return key;
+        }
+        if (isDiffWorkspaceTabKey(key)) {
+            return makeDiffWorkspaceTabKey(nextPath);
         }
         return isMarkdownPreviewWorkspaceTabKey(key)
             ? makeMarkdownPreviewWorkspaceTabKey(nextPath)
@@ -4103,6 +4130,28 @@ class EditorManager {
                 );
             }
             session.editorState.viewStates = nextViewStates;
+        }
+
+        if (this.diffFiles.size > 0) {
+            for (const [path, diffEntry] of [...this.diffFiles.entries()]) {
+                const nextPath = this.remapTreePath(
+                    path,
+                    oldPath,
+                    newPath,
+                    isDirectory
+                );
+                if (nextPath === path) continue;
+                this.diffFiles.delete(path);
+                if (nextPath) {
+                    this.diffFiles.set(nextPath, diffEntry);
+                }
+            }
+            this.diffEditorFilePath = this.remapTreePath(
+                this.diffEditorFilePath,
+                oldPath,
+                newPath,
+                isDirectory
+            );
         }
 
         const nextSelectedTreePath = this.remapTreePath(
@@ -5258,13 +5307,9 @@ class EditorManager {
             return;
         }
 
-        await this.openFile(filePath, targetSession, {
-            focusEditor: false
-        });
-
         this.diffFiles.set(filePath, { originalContent, modifiedContent });
         this.diffEditorFilePath = '';
-        this.activateFileTab(filePath, false, { focusEditor: false });
+        this.activateDiffTab(filePath, false, { focusEditor: false });
         window.__tabminalCloseSidebarIfFloating?.();
     }
 
@@ -5273,6 +5318,7 @@ class EditorManager {
         if (!entry || !this.monacoInstance || !this.diffEditorContainer) return;
 
         if (this.agentContainer) this.agentContainer.style.display = 'none';
+        this.contentContainer?.classList.remove('markdown-split-active');
         if (this.monacoContainer) this.monacoContainer.style.display = 'none';
         if (this.imagePreviewContainer) {
             this.imagePreviewContainer.style.display = 'none';
@@ -5368,8 +5414,6 @@ class EditorManager {
         const jumpToLine = async (lineNumber) => {
             const filePath = this.diffEditorFilePath;
             if (!filePath || !lineNumber || !this.currentSession) return;
-            this.diffFiles.delete(filePath);
-            this.detachDiffEditor();
             await this.openFile(filePath, this.currentSession, {
                 focusEditor: true
             });
@@ -7816,7 +7860,9 @@ class EditorManager {
         
         this.updateEditorPaneVisibility();
 
-        if (options.activatePreview && isSupportedMarkdownPath(filePath)) {
+        if (options.activate === false) {
+            this.renderEditorTabs();
+        } else if (options.activatePreview && isSupportedMarkdownPath(filePath)) {
             this.activateMarkdownPreviewTab(filePath, false);
         } else {
             this.activateFileTab(filePath, false, options);
@@ -7932,6 +7978,15 @@ class EditorManager {
                 });
             }
         }
+        for (const path of this.diffFiles.keys()) {
+            const name = path.split('/').pop();
+            tabs.push({
+                kind: 'diff',
+                key: makeDiffWorkspaceTabKey(path),
+                label: `${name} (Diff)`,
+                path
+            });
+        }
         for (const agentTab of getAgentTabsForSession(this.currentSession)) {
             tabs.push({
                 kind: 'agent',
@@ -7968,6 +8023,13 @@ class EditorManager {
                 tab,
                 () => this.activateFileTab(tabInfo.path),
                 { ignoreSelector: '.close-btn, .tab-action-btn' }
+            );
+        } else if (tabInfo.kind === 'diff') {
+            tab.onclick = () => this.activateDiffTab(tabInfo.path);
+            bindSingleTapActivation(
+                tab,
+                () => this.activateDiffTab(tabInfo.path),
+                { ignoreSelector: '.close-btn' }
             );
         } else if (tabInfo.kind === 'preview') {
             tab.onclick = () => this.activateMarkdownPreviewTab(tabInfo.path);
@@ -8102,6 +8164,43 @@ class EditorManager {
         tab.dataset.renderSignature = signature;
     }
 
+    syncDiffEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
+        const path = tabInfo.path;
+        const name = path.split('/').pop();
+        tab.className = 'editor-tab diff-editor-tab';
+        tab.classList.toggle('active', tabInfo.key === activeWorkspaceTabKey);
+        tab.title = `Diff: ${path}`;
+
+        const signature = JSON.stringify({
+            kind: tabInfo.kind,
+            path,
+            name
+        });
+        if (tab.dataset.renderSignature === signature) {
+            return;
+        }
+
+        const icon = document.createElement('span');
+        icon.className = 'file-editor-tab-icon';
+        icon.innerHTML = DIFF_ICON_SVG;
+
+        const label = document.createElement('span');
+        label.textContent = `${name} Diff`;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'close-btn';
+        closeBtn.innerHTML = CLOSE_ICON_SVG;
+        closeBtn.title = 'Close';
+        closeBtn.setAttribute('aria-label', `Close diff ${name}`);
+        bindTabChildAction(closeBtn, () => {
+            this.closeDiffTab(path);
+        });
+
+        tab.replaceChildren(icon, label, closeBtn);
+        tab.dataset.renderSignature = signature;
+    }
+
     syncPreviewEditorTab(tab, tabInfo, activeWorkspaceTabKey) {
         const path = tabInfo.path;
         const splitPath = this.getMarkdownSplitPath(this.currentSession);
@@ -8198,6 +8297,8 @@ class EditorManager {
             this.syncTerminalEditorTab(tab, tabInfo, activeWorkspaceTabKey);
         } else if (tabInfo.kind === 'file') {
             this.syncFileEditorTab(tab, tabInfo, activeWorkspaceTabKey);
+        } else if (tabInfo.kind === 'diff') {
+            this.syncDiffEditorTab(tab, tabInfo, activeWorkspaceTabKey);
         } else if (tabInfo.kind === 'preview') {
             this.syncPreviewEditorTab(tab, tabInfo, activeWorkspaceTabKey);
         } else if (tabInfo.kind === 'agent') {
@@ -8387,6 +8488,16 @@ class EditorManager {
             );
             return;
         }
+        if (isDiffWorkspaceTabKey(workspaceTabKey)) {
+            this.activateDiffTab(
+                workspaceKeyToFilePath(workspaceTabKey),
+                isRestore,
+                {
+                    focusEditor: !preserveFocus
+                }
+            );
+            return;
+        }
         this.activateFileTab(
             workspaceKeyToFilePath(workspaceTabKey),
             isRestore,
@@ -8423,6 +8534,7 @@ class EditorManager {
         }
         this.renderEditorTabs();
         this.currentSession.updateTabUI();
+        this.detachDiffEditor();
         this.monacoContainer.style.display = 'none';
         this.imagePreviewContainer.style.display = 'none';
         this.hidePdfPreview();
@@ -8457,7 +8569,9 @@ class EditorManager {
             }
         }
 
-        state.activeFilePath = filePath;
+        if (state.openFiles.includes(filePath)) {
+            state.activeFilePath = filePath;
+        }
         this.currentSession.workspaceState.activeTabKey =
             makeMarkdownPreviewWorkspaceTabKey(filePath);
         this.currentSession.workspaceState.lastNonTerminalTabKey =
@@ -8472,6 +8586,7 @@ class EditorManager {
         this.syncTerminalWorkspacePlacement(
             this.currentSession.workspaceState.activeTabKey
         );
+        this.detachDiffEditor();
 
         if (!file) {
             void this.openFile(filePath, true, {
@@ -8498,6 +8613,80 @@ class EditorManager {
             });
         }
         void this.checkActiveFileVersion();
+    }
+
+    activateDiffTab(filePath, isRestore = false, options = {}) {
+        if (!this.currentSession || !filePath || !this.diffFiles.has(filePath)) {
+            return;
+        }
+        const focusEditor = options.focusEditor !== false;
+        const state = this.currentSession.editorState;
+        const previousActiveFilePath = state.activeFilePath;
+        if (!isRestore && previousActiveFilePath && previousActiveFilePath !== filePath) {
+            const currentGlobal = this.getModel(previousActiveFilePath);
+            if (currentGlobal && currentGlobal.type === 'text' && this.editor) {
+                state.viewStates.set(previousActiveFilePath, this.editor.saveViewState());
+            }
+        }
+
+        state.activeFilePath = filePath;
+        this.currentSession.workspaceState.activeTabKey = makeDiffWorkspaceTabKey(filePath);
+        this.currentSession.workspaceState.lastNonTerminalTabKey =
+            makeDiffWorkspaceTabKey(filePath);
+        if (!isRestore) {
+            this.currentSession.saveState({ touchWorkspace: true });
+        }
+
+        this.renderEditorTabs();
+        this.emptyState.style.display = 'none';
+        this.syncTerminalWorkspacePlacement(
+            this.currentSession.workspaceState.activeTabKey
+        );
+        this.showDiffForActiveFile(filePath);
+        if (focusEditor) {
+            this.diffEditor?.getModifiedEditor?.()?.focus?.();
+        }
+    }
+
+    closeDiffTab(filePath) {
+        if (!this.currentSession || !filePath) return;
+        const wasActive = this.getActiveWorkspaceTabKey(this.currentSession)
+            === makeDiffWorkspaceTabKey(filePath);
+        this.diffFiles.delete(filePath);
+        if (this.diffEditorFilePath === filePath) {
+            this.detachDiffEditor();
+            if (this.diffEditor) {
+                const previousModel = this.diffEditor.getModel();
+                this.diffEditor.setModel(null);
+                if (previousModel) {
+                    previousModel.original?.dispose();
+                    previousModel.modified?.dispose();
+                }
+            }
+        }
+        if (this.currentSession.workspaceState.lastNonTerminalTabKey
+            === makeDiffWorkspaceTabKey(filePath)
+        ) {
+            this.currentSession.workspaceState.lastNonTerminalTabKey = '';
+        }
+        this.renderEditorTabs();
+        if (wasActive) {
+            const fallbackKey = this.getPreferredNonTerminalWorkspaceTabKey(
+                this.currentSession
+            );
+            if (fallbackKey) {
+                this.activateWorkspaceTab(fallbackKey, false, {
+                    preserveFocus: false
+                });
+            } else {
+                this.currentSession.workspaceState.activeTabKey = '';
+                this.currentSession.workspaceState.lastNonTerminalTabKey = '';
+                this.showEmptyState();
+                this.currentSession.saveState({ touchWorkspace: true });
+            }
+        } else {
+            this.currentSession.saveState({ touchWorkspace: true });
+        }
     }
 
     activateFileTab(filePath, isRestore = false, options = {}) {
@@ -8535,11 +8724,7 @@ class EditorManager {
             this.currentSession.workspaceState.activeTabKey
         );
 
-        if (this.diffFiles && this.diffFiles.has(filePath)) {
-            this.showDiffForActiveFile(filePath);
-            return;
-        }
-        if (this.diffEditorFilePath && this.diffEditorFilePath !== filePath) {
+        if (this.diffEditorFilePath) {
             this.detachDiffEditor();
         }
 
@@ -8693,6 +8878,7 @@ class EditorManager {
         this.renderEditorTabs();
         this.currentSession.updateTabUI();
         this.syncTerminalWorkspacePlacement(agentTabKey);
+        this.detachDiffEditor();
         this.monacoContainer.style.display = 'none';
         this.imagePreviewContainer.style.display = 'none';
         this.hidePdfPreview();
@@ -15224,6 +15410,9 @@ function getWorkspaceTabKeysForSession(session) {
         if (isSupportedMarkdownPath(path)) {
             keys.push(makeMarkdownPreviewWorkspaceTabKey(path));
         }
+    }
+    for (const path of editorManager?.diffFiles?.keys?.() || []) {
+        keys.push(makeDiffWorkspaceTabKey(path));
     }
     for (const agentTab of getAgentTabsForSession(session)) {
         keys.push(agentTab.key);

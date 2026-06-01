@@ -1255,32 +1255,18 @@ class HostClientConnection {
         const dirPath = String(message?.payload?.path || message?.id || '').trim();
         if (!dirPath || this.fileTreeWatchers.has(dirPath)) return;
         let timer = null;
-        let gitStatusTimer = null;
         let gitWatchersRefreshTimer = null;
         let gitWatchersRefreshInFlight = false;
         let gitWatchersRefreshRerunRequested = false;
-        let gitStatusInFlight = false;
-        let gitStatusRerunRequested = false;
-        let lastGitStatusReadAt = 0;
         let lastGitWatchersRefreshAt = 0;
         let lastChangedSentAt = 0;
-        const pendingChangedPaths = new Set();
         const FILE_TREE_CHANGED_THROTTLE_MS = 10_000;
-        const GIT_STATUS_CHANGED_DEBOUNCE_MS = 500;
-        const GIT_STATUS_CHANGED_THROTTLE_MS = 10_000;
         const GIT_WATCHERS_REFRESH_DEBOUNCE_MS = 1000;
         const GIT_WATCHERS_REFRESH_THROTTLE_MS = 30_000;
         const childWatchers = new Map();
         const gitWatchers = new Map();
         const absoluteDirPath = path.resolve(process.cwd(), dirPath);
-        let gitStatusSnapshot = new Map();
-        let gitBranchSnapshot = '';
-        let gitStatusSnapshotInitialized = false;
-        let gitRepoRoot = null;
-        const sendChanged = (changedPath) => {
-            if (changedPath) {
-                pendingChangedPaths.add(changedPath);
-            }
+        const sendChanged = () => {
             clearTimeout(timer);
             const now = Date.now();
             const delay = Math.max(
@@ -1289,13 +1275,10 @@ class HostClientConnection {
             );
             timer = setTimeout(() => {
                 lastChangedSentAt = Date.now();
-                const paths = Array.from(pendingChangedPaths);
-                pendingChangedPaths.clear();
                 this.send({
                     type: 'file.tree.changed',
                     path: dirPath,
-                    version: `${Date.now()}`,
-                    changedPaths: paths
+                    version: `${Date.now()}`
                 });
             }, delay);
         };
@@ -1311,20 +1294,12 @@ class HostClientConnection {
             }
             gitWatchers.clear();
         };
-        const arePathMapsEqual = (left, right) => {
-            if (left.size !== right.size) return false;
-            for (const [key, value] of left) {
-                if (right.get(key) !== value) return false;
-            }
-            return true;
-        };
         const entry = {
             watcher: null,
             closed: false,
             close: () => {
                 entry.closed = true;
                 clearTimeout(timer);
-                clearTimeout(gitStatusTimer);
                 clearTimeout(gitWatchersRefreshTimer);
                 entry.watcher?.close();
                 closeChildWatchers();
@@ -1349,7 +1324,7 @@ class HostClientConnection {
                 nextPaths.add(childPath);
                 if (childWatchers.has(childPath)) continue;
                 try {
-                    const childWatcher = fs.watch(childPath, () => sendChanged(childPath));
+                    const childWatcher = fs.watch(childPath, sendChanged);
                     childWatchers.set(childPath, childWatcher);
                 } catch {
                     // 刷新 watcher 时文件可能已被删除，忽略即可。
@@ -1365,113 +1340,11 @@ class HostClientConnection {
         const watchGitPath = (targetPath) => {
             if (!targetPath || gitWatchers.has(targetPath)) return;
             try {
-                const watcher = fs.watch(targetPath, () => {
-                    scheduleGitStatusChanged();
-                });
+                const watcher = fs.watch(targetPath, sendChanged);
                 gitWatchers.set(targetPath, watcher);
             } catch {
                 // Git 元数据路径可能要到首次提交或 ref 更新后才出现。
             }
-        };
-        const readGitStatusSnapshot = async () => {
-            let stdout;
-            const statusCwd = gitRepoRoot || absoluteDirPath;
-            try {
-                ({ stdout } = await execFileAsync(
-                    'git',
-                    ['status', '--porcelain=v1', '--branch', '-z', '--untracked-files=normal'],
-                    { cwd: statusCwd, timeout: 5000 }
-                ));
-            } catch {
-                return null;
-            }
-
-            const entries = new Map();
-            let branch = '';
-            const records = stdout.split('\0').filter(Boolean);
-            for (let index = 0; index < records.length; index += 1) {
-                const record = records[index];
-                if (record.startsWith('## ')) {
-                    branch = record;
-                    continue;
-                }
-                if (record.length < 4) continue;
-                const status = record.slice(0, 2);
-                const repoPath = record.slice(3).replace(/\/$/, '');
-                if (repoPath) {
-                    entries.set(path.resolve(statusCwd, repoPath), status);
-                }
-                if (status.includes('R') || status.includes('C')) {
-                    const sourcePath = records[index + 1]?.replace(/\/$/, '');
-                    if (sourcePath) {
-                        entries.set(
-                            path.resolve(statusCwd, sourcePath),
-                            `${status}:source`
-                        );
-                    }
-                    index += 1;
-                }
-            }
-            return { entries, branch };
-        };
-        const flushGitStatusChanged = async () => {
-            if (entry.closed) return;
-            if (gitStatusInFlight) {
-                gitStatusRerunRequested = true;
-                return;
-            }
-
-            gitStatusInFlight = true;
-            lastGitStatusReadAt = Date.now();
-            const nextSnapshot = await readGitStatusSnapshot();
-            gitStatusInFlight = false;
-            if (gitStatusRerunRequested) {
-                gitStatusRerunRequested = false;
-                scheduleGitStatusChanged();
-            }
-            if (!nextSnapshot || entry.closed) return;
-
-            const nextEntries = nextSnapshot.entries;
-            const branchChanged = gitBranchSnapshot !== nextSnapshot.branch;
-            if (arePathMapsEqual(gitStatusSnapshot, nextEntries)) {
-                if (branchChanged) sendChanged(dirPath);
-                gitBranchSnapshot = nextSnapshot.branch;
-                return;
-            }
-
-            const changedPaths = new Set();
-            for (const [changedPath, status] of nextEntries) {
-                if (gitStatusSnapshot.get(changedPath) !== status) {
-                    changedPaths.add(changedPath);
-                }
-            }
-            for (const changedPath of gitStatusSnapshot.keys()) {
-                if (!nextEntries.has(changedPath)) {
-                    changedPaths.add(changedPath);
-                }
-            }
-            gitStatusSnapshot = nextEntries;
-            gitBranchSnapshot = nextSnapshot.branch;
-            gitStatusSnapshotInitialized = true;
-            if (changedPaths.size === 0) {
-                sendChanged(dirPath);
-                return;
-            }
-            for (const changedPath of changedPaths) {
-                sendChanged(changedPath);
-            }
-        };
-        const scheduleGitStatusChanged = () => {
-            if (entry.closed) return;
-            clearTimeout(gitStatusTimer);
-            const now = Date.now();
-            const delay = Math.max(
-                GIT_STATUS_CHANGED_DEBOUNCE_MS,
-                (lastGitStatusReadAt + GIT_STATUS_CHANGED_THROTTLE_MS) - now
-            );
-            gitStatusTimer = setTimeout(() => {
-                void flushGitStatusChanged();
-            }, delay);
         };
         const refreshGitWatchersNow = async () => {
             let stdout;
@@ -1498,17 +1371,6 @@ class HostClientConnection {
             const branch = branchRaw && branchRaw !== 'HEAD'
                 ? branchRaw
                 : '';
-            const repoChanged = gitRepoRoot !== repoRoot;
-            gitRepoRoot = repoRoot;
-
-            const nextSnapshot = !gitStatusSnapshotInitialized || repoChanged
-                ? await readGitStatusSnapshot()
-                : null;
-            if (nextSnapshot && !entry.closed) {
-                gitStatusSnapshot = nextSnapshot.entries;
-                gitBranchSnapshot = nextSnapshot.branch;
-                gitStatusSnapshotInitialized = true;
-            }
 
             watchGitPath(path.join(gitDir, 'index'));
             watchGitPath(path.join(gitDir, 'HEAD'));
@@ -1549,11 +1411,10 @@ class HostClientConnection {
         try {
             entry.watcher = fs.watch(absoluteDirPath, (eventType, filename) => {
                 if (filename === '.git') {
-                    scheduleGitStatusChanged();
                     scheduleGitWatchersRefresh();
                     return;
                 }
-                sendChanged(filename ? path.posix.join(dirPath, filename) : dirPath);
+                sendChanged();
                 void refreshChildWatchers();
                 scheduleGitWatchersRefresh();
             });
