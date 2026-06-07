@@ -12,11 +12,33 @@
     <link rel="apple-touch-icon" href="./apple-touch-icon.png">
     <link rel="manifest" href="./manifest.json">
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <script>
+        (function() {
+            const storageKey = 'tabminal_theme';
+            let theme = 'dark';
+            try {
+                const saved = localStorage.getItem(storageKey);
+                if (saved === 'light' || saved === 'dark') {
+                    theme = saved;
+                }
+            } catch {
+                // Ignore storage failures; dark remains the default.
+            }
+            document.documentElement.dataset.theme = theme;
+            document.documentElement.style.colorScheme = theme;
+        })();
+    </script>
     <style>
         :root {
             color-scheme: dark;
             --bg-base: #002b36;
             --text-base: #839496;
+        }
+
+        :root[data-theme="light"] {
+            color-scheme: light;
+            --bg-base: #f8f3dc;
+            --text-base: #102f38;
         }
 
         html,
@@ -770,6 +792,10 @@
                 <!-- Tabs will be dynamically inserted here -->
                 <li id="new-tab-item" class="new-tab-item">
                     <div id="server-controls" class="server-controls"></div>
+                    <button id="theme-toggle-button" class="theme-toggle-button" type="button" aria-label="切换亮色主题" title="切换亮色主题">
+                        <span class="theme-toggle-icon" aria-hidden="true"></span>
+                        <span class="theme-toggle-text">亮色</span>
+                    </button>
                     <button id="add-server-button" class="new-tab-button" aria-label="Add Host">+ Add Host</button>
                 </li>
             </ul>

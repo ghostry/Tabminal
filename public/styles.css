@@ -25,14 +25,14 @@
     z-index: 100;
     display: flex;
     align-items: center;
-    background-color: #252526;
+    background-color: var(--search-bar-bg);
     height: 33px;
     /* Exact VS Code height */
     padding: 0 4px;
     /* Exact VS Code padding */
     border-radius: 0 0 4px 4px;
     /* Rounded bottom */
-    box-shadow: 0 0 8px 2px rgba(0, 0, 0, 0.36);
+    box-shadow: 0 0 8px 2px var(--shadow-strong);
     /* Exact VS Code shadow */
     border: none;
     /* VS Code uses shadow, not border */
@@ -50,10 +50,10 @@
 }
 
 .search-bar input {
-    background-color: #3c3c3c;
+    background-color: var(--search-input-bg);
     border: 1px solid transparent;
     /* Transparent border default */
-    color: #cccccc;
+    color: var(--search-text);
     font-family: inherit;
     font-size: 13px;
     height: 23px;
@@ -87,7 +87,7 @@
 .search-bar .option-btn {
     background: transparent;
     border: none;
-    color: #c5c5c5;
+    color: var(--search-button);
     width: 20px;
     height: 20px;
     border-radius: 3px;
@@ -106,7 +106,7 @@
 }
 
 .search-bar .option-btn.active {
-    color: #ffffff;
+    color: var(--text-highlight);
     /* Active text white */
     background-color: rgba(0, 127, 212, 0.4);
     /* VS Code active blue */
@@ -118,7 +118,7 @@
 .search-bar .icon-btn {
     background: transparent;
     border: none;
-    color: #cccccc;
+    color: var(--search-text);
     width: 24px;
     height: 24px;
     border-radius: 3px;
@@ -148,7 +148,7 @@
 }
 
 .search-bar .search-results {
-    color: #cccccc;
+    color: var(--search-text);
     font-size: 12px;
     margin: 0 8px;
     width: 80px;
@@ -172,17 +172,67 @@
     opacity: 1 !important;
 }
 
+:root[data-theme="light"] .xterm .xterm-selection div {
+    background-color: rgba(255, 209, 102, 0.82) !important;
+    outline: 1px solid rgba(16, 47, 56, 0.32);
+}
+
 :root {
     color-scheme: dark;
     --bg-base: #002b36;
     --bg-surface: #073642;
+    --bg-surface-elevated: #0b3f4b;
     --text-base: #839496;
     --text-muted: #586e75;
     --text-highlight: #93a1a1;
     --border-color: rgba(88, 110, 117, 0.5);
     --accent-color: #268bd2;
+    --accent-primary: #2aa198;
+    --danger-color: #dc322f;
+    --success-color: #859900;
+    --control-overlay-bg: rgba(0, 0, 0, 0.6);
+    --control-overlay-hover-bg: rgba(0, 0, 0, 0.8);
+    --control-overlay-border: rgba(255, 255, 255, 0.2);
+    --tab-active-bg: rgba(38, 139, 210, 0.15);
+    --tab-hover-bg: rgba(88, 110, 117, 0.2);
+    --managed-session-bg: rgba(42, 161, 152, 0.08);
+    --managed-session-active-bg: rgba(42, 161, 152, 0.16);
+    --shadow-strong: rgba(0, 0, 0, 0.5);
+    --preview-checker-color: #0b3f4b;
+    --search-bar-bg: #252526;
+    --search-input-bg: #3c3c3c;
+    --search-text: #cccccc;
+    --search-button: #c5c5c5;
     --app-height: 100%;
     --app-width: 100%;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --bg-base: #f8f3dc;
+    --bg-surface: #fffdf2;
+    --bg-surface-elevated: #ffffff;
+    --text-base: #18343d;
+    --text-muted: #476570;
+    --text-highlight: #071f28;
+    --border-color: rgba(18, 61, 75, 0.38);
+    --accent-color: #005ea8;
+    --accent-primary: #00756f;
+    --danger-color: #b41414;
+    --success-color: #516d00;
+    --control-overlay-bg: rgba(255, 253, 242, 0.94);
+    --control-overlay-hover-bg: #ffffff;
+    --control-overlay-border: rgba(12, 49, 63, 0.36);
+    --tab-active-bg: rgba(0, 94, 168, 0.16);
+    --tab-hover-bg: rgba(0, 94, 168, 0.10);
+    --managed-session-bg: rgba(0, 117, 111, 0.11);
+    --managed-session-active-bg: rgba(0, 117, 111, 0.18);
+    --shadow-strong: rgba(25, 55, 65, 0.28);
+    --preview-checker-color: #e1d7a8;
+    --search-bar-bg: #fffdf2;
+    --search-input-bg: #ffffff;
+    --search-text: #071f28;
+    --search-button: #18343d;
 }
 
 /* Fix Monaco Editor Box Sizing Context */
@@ -332,7 +382,7 @@ body.soft-keyboard-open .app-layout {
         /* Toggle visibility to remove shadow artifact when closed */
         visibility: hidden;
         transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0s linear 0.3s;
-        box-shadow: 4px 0 12px rgba(0, 0, 0, 0.5);
+        box-shadow: 4px 0 12px var(--shadow-strong);
         border-right: 1px solid var(--border-color);
     }
 
@@ -362,7 +412,7 @@ body.soft-keyboard-open .app-layout {
     visibility: hidden;
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
         visibility 0s linear 0.3s;
-    box-shadow: 4px 0 12px rgba(0, 0, 0, 0.5);
+    box-shadow: 4px 0 12px var(--shadow-strong);
     border-right: 1px solid var(--border-color);
 }
 
@@ -458,6 +508,48 @@ body.soft-keyboard-open .app-layout {
     transition: background-color 0.2s ease, border-color 0.2s ease;
 }
 
+.theme-toggle-button {
+    width: 100%;
+    min-height: 40px;
+    margin-bottom: 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-surface);
+    color: var(--text-highlight);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.theme-toggle-button:hover,
+.theme-toggle-button:focus-visible {
+    border-color: var(--accent-color);
+    color: var(--text-highlight);
+    outline: none;
+}
+
+.theme-toggle-icon {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text-highlight);
+    box-shadow: 0 0 0 3px rgba(42, 161, 152, 0.18);
+    flex: 0 0 auto;
+}
+
+:root[data-theme="light"] .theme-toggle-icon {
+    background: #f7b500;
+    box-shadow: 0 0 0 3px rgba(247, 181, 0, 0.24);
+}
+
 .server-controls {
     display: flex;
     flex-direction: column;
@@ -512,8 +604,8 @@ body.soft-keyboard-open .app-layout {
 }
 
 .server-main-button.needs-login {
-    border-color: #dc322f;
-    color: #dc322f;
+    border-color: var(--danger-color);
+    color: var(--danger-color);
 }
 
 .server-delete-button {
@@ -524,8 +616,8 @@ body.soft-keyboard-open .app-layout {
     width: 28px;
     height: 28px;
     border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    background-color: rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--control-overlay-border);
+    background-color: var(--control-overlay-bg);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     color: var(--text-highlight);
@@ -554,13 +646,13 @@ body.soft-keyboard-open .app-layout {
 }
 
 .server-delete-button:hover {
-    background-color: rgba(220, 50, 47, 0.8);
-    border-color: rgba(220, 50, 47, 1);
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
     color: white;
 }
 
 .server-delete-button:active {
-    background-color: rgba(220, 50, 47, 1);
+    background-color: var(--danger-color);
     transform: translateY(1px);
 }
 
@@ -571,8 +663,8 @@ body.soft-keyboard-open .app-layout {
     width: 28px;
     height: 28px;
     border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    background-color: rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--control-overlay-border);
+    background-color: var(--control-overlay-bg);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     color: var(--text-highlight);
@@ -599,8 +691,8 @@ body.soft-keyboard-open .app-layout {
 }
 
 .server-auth-button:hover {
-    background-color: rgba(0, 0, 0, 0.8);
-    border-color: rgba(255, 255, 255, 0.4);
+    background-color: var(--control-overlay-hover-bg);
+    border-color: var(--border-color);
     color: var(--text-highlight);
 }
 
@@ -628,13 +720,13 @@ body.soft-keyboard-open .app-layout {
 .server-latency-group {
     display: inline-flex;
     align-items: center;
-    color: #859900;
+    color: var(--success-color);
     min-width: 44px;
     flex-shrink: 0;
 }
 
 .server-latency-group.offline {
-    color: #dc322f;
+    color: var(--danger-color);
 }
 
 .server-latency-value {
@@ -651,7 +743,7 @@ body.soft-keyboard-open .app-layout {
 }
 
 .server-latency-value.offline {
-    color: #dc322f;
+    color: var(--danger-color);
 }
 
 .server-heartbeat-canvas {
@@ -665,13 +757,13 @@ body.soft-keyboard-open .app-layout {
 }
 
 .server-main-button.needs-login .server-latency-value {
-    color: #dc322f;
+    color: var(--danger-color);
 }
 
 /* Desktop Hover Effects */
 @media (pointer: fine) {
     .tab-item:hover {
-        background-color: rgba(88, 110, 117, 0.2);
+        background-color: var(--tab-hover-bg);
     }
 }
 
@@ -707,17 +799,17 @@ body.soft-keyboard-open .app-layout {
 
 .tab-item.active {
     border-color: var(--accent-color);
-    background-color: rgba(38, 139, 210, 0.15);
+    background-color: var(--tab-active-bg);
 }
 
 .tab-item.agent-managed-session {
     border-color: rgba(42, 161, 152, 0.55);
-    background-color: rgba(42, 161, 152, 0.08);
+    background-color: var(--managed-session-bg);
 }
 
 .tab-item.agent-managed-session.active {
     border-color: rgba(42, 161, 152, 0.9);
-    background-color: rgba(42, 161, 152, 0.16);
+    background-color: var(--managed-session-active-bg);
 }
 
 .close-tab-button {
@@ -731,12 +823,12 @@ body.soft-keyboard-open .app-layout {
     height: 28px;
     border-radius: 4px;
     /* Square with rounded corners */
-    background-color: rgba(0, 0, 0, 0.6);
+    background-color: var(--control-overlay-bg);
     /* Darker for visibility */
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     color: var(--text-highlight);
-    border: 1px solid rgba(255, 255, 255, 0.2);
+    border: 1px solid var(--control-overlay-border);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -750,9 +842,9 @@ body.soft-keyboard-open .app-layout {
 }
 
 .close-tab-button:hover {
-    background-color: rgba(220, 50, 47, 0.8);
+    background-color: var(--danger-color);
     /* Red hover */
-    border-color: rgba(220, 50, 47, 1);
+    border-color: var(--danger-color);
     color: white;
     opacity: 1;
 }
@@ -3251,11 +3343,11 @@ kbd {
     opacity: 0.72;
 }
 
-/* Ensure native <select> dropdown options use dark theme */
+/* Keep native <select> dropdown options aligned with the active theme. */
 .agent-panel-mode-select option,
 .agent-panel-mode-select optgroup {
-    background-color: #073642;
-    color: #93a1a1;
+    background-color: var(--bg-surface);
+    color: var(--text-highlight);
 }
 
 .agent-panel-button:disabled:hover,
@@ -4011,12 +4103,12 @@ kbd {
     align-items: center;
     justify-content: center;
     overflow: auto;
-    background-color: #073642;
+    background-color: var(--bg-surface);
     background-image:
-        linear-gradient(45deg, #0b3f4b 25%, transparent 25%),
-        linear-gradient(-45deg, #0b3f4b 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #0b3f4b 75%),
-        linear-gradient(-45deg, transparent 75%, #0b3f4b 75%);
+        linear-gradient(45deg, var(--preview-checker-color) 25%, transparent 25%),
+        linear-gradient(-45deg, var(--preview-checker-color) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, var(--preview-checker-color) 75%),
+        linear-gradient(-45deg, transparent 75%, var(--preview-checker-color) 75%);
     background-size: 20px 20px;
     background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
 }
@@ -4025,7 +4117,7 @@ kbd {
     max-width: 95%;
     max-height: 95%;
     object-fit: contain;
-    box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 0 20px var(--shadow-strong);
 }
 
 .pdf-preview-container {
@@ -4048,6 +4140,10 @@ kbd {
     min-height: 0;
     background:
         linear-gradient(180deg, rgba(7, 54, 66, 0.98), rgba(0, 36, 46, 0.98));
+}
+
+:root[data-theme="light"] .markdown-preview-container {
+    background: linear-gradient(180deg, #f8f3dc, #efe5b6);
 }
 
 .editor-content.markdown-split-active > .markdown-preview-container {
@@ -4080,6 +4176,23 @@ kbd {
     border: 1px solid rgba(229, 237, 239, 0.08);
     border-radius: 12px;
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+}
+
+:root[data-theme="light"] .markdown-preview-sheet.markdown-body {
+    background: #fffdf2;
+    color: #102f38;
+    border-color: rgba(18, 61, 75, 0.22);
+    box-shadow: 0 12px 32px rgba(25, 55, 65, 0.18);
+}
+
+:root[data-theme="light"] .markdown-preview-sheet.markdown-body a {
+    color: #005ea8;
+}
+
+:root[data-theme="light"] .markdown-preview-sheet.markdown-body pre,
+:root[data-theme="light"] .markdown-preview-sheet.markdown-body code {
+    background-color: #efe5b6;
+    color: #071f28;
 }
 
 .editor-content.markdown-split-active
@@ -4788,6 +4901,261 @@ kbd {
     flex-grow: 1;
     min-width: 0;
     /* Allow text wrap */
+}
+
+/* Light theme hardcoded-surface cleanup. */
+:root[data-theme="light"] .sidebar-overlay {
+    background: rgba(20, 52, 62, 0.24);
+}
+
+:root[data-theme="light"] .tab-info-overlay {
+    background: rgba(255, 253, 242, 0.88);
+    border-top-color: rgba(18, 61, 75, 0.22);
+}
+
+:root[data-theme="light"] .system-status-bar,
+:root[data-theme="light"] .soft-keyboard,
+:root[data-theme="light"] .workspace-tabs-bar,
+:root[data-theme="light"] .editor-tabs-bar {
+    background-color: rgba(248, 243, 220, 0.94);
+}
+
+:root[data-theme="light"] .soft-key {
+    background: rgba(255, 253, 242, 0.86);
+    color: var(--text-highlight);
+}
+
+:root[data-theme="light"] .key-shift,
+:root[data-theme="light"] .workspace-tab-close,
+:root[data-theme="light"] .editor-tab-close {
+    color: rgba(71, 101, 112, 0.82);
+}
+
+:root[data-theme="light"] .modal {
+    background-color: rgba(20, 52, 62, 0.24);
+}
+
+:root[data-theme="light"] #shortcuts-modal {
+    background-color: rgba(20, 52, 62, 0.12);
+}
+
+:root[data-theme="light"] .modal-content,
+:root[data-theme="light"] .shortcuts-content,
+:root[data-theme="light"] .file-tree-context-menu,
+:root[data-theme="light"] .agent-dropdown,
+:root[data-theme="light"] .agent-send-menu {
+    background-color: rgba(255, 253, 242, 0.96);
+    color: var(--text-base);
+    border-color: var(--border-color);
+    box-shadow: 0 18px 42px rgba(25, 55, 65, 0.22);
+}
+
+:root[data-theme="light"] .auth-session-row,
+:root[data-theme="light"] .agent-plan-card,
+:root[data-theme="light"] .agent-plan-terminal-list,
+:root[data-theme="light"] .agent-tool-call,
+:root[data-theme="light"] .agent-permission-card,
+:root[data-theme="light"] .agent-tool-call-section,
+:root[data-theme="light"] .agent-tool-call-terminal-output,
+:root[data-theme="light"] .agent-empty-state,
+:root[data-theme="light"] .agent-message,
+:root[data-theme="light"] .agent-tool-call-editor,
+:root[data-theme="light"] .mobile-editor-selection-menu {
+    background-color: rgba(255, 253, 242, 0.78);
+    border-color: rgba(18, 61, 75, 0.22);
+    color: var(--text-base);
+}
+
+:root[data-theme="light"] .auth-session-row.current,
+:root[data-theme="light"] .agent-message.user {
+    border-color: rgba(0, 94, 168, 0.45);
+}
+
+:root[data-theme="light"] .terminal-wrapper {
+    background-color: var(--bg-base);
+}
+
+:root[data-theme="light"] .terminal-layout-button,
+:root[data-theme="light"] .agent-usage-hud,
+:root[data-theme="light"] .agent-usage-hud:hover,
+:root[data-theme="light"] .agent-usage-hud:focus-within,
+:root[data-theme="light"] .agent-usage-hud.is-expanded,
+:root[data-theme="light"] .agent-panel-header,
+:root[data-theme="light"] .agent-panel-mode-select,
+:root[data-theme="light"] .agent-panel-select-shell[data-selector-role="mode"],
+:root[data-theme="light"] .agent-panel-select-shell[data-selector-role="model"],
+:root[data-theme="light"] .agent-panel-select-shell[data-selector-role="thought_level"],
+:root[data-theme="light"] .agent-usage-pill,
+:root[data-theme="light"] .agent-status-pill,
+:root[data-theme="light"] .agent-permission-option.secondary,
+:root[data-theme="light"] .agent-panel-button.secondary,
+:root[data-theme="light"] .agent-command-chip,
+:root[data-theme="light"] .agent-panel-button,
+:root[data-theme="light"] .agent-dropdown-item {
+    background-color: rgba(255, 253, 242, 0.82);
+    border-color: rgba(18, 61, 75, 0.24);
+    color: var(--text-highlight);
+    box-shadow: none;
+}
+
+:root[data-theme="light"] .terminal-layout-button:hover,
+:root[data-theme="light"] .agent-panel-button:hover,
+:root[data-theme="light"] .agent-dropdown-item:hover,
+:root[data-theme="light"] .agent-send-menu-item:hover,
+:root[data-theme="light"] .file-tree-context-menu-item:hover,
+:root[data-theme="light"] .agent-empty-state-action:hover,
+:root[data-theme="light"] .agent-permission-option:hover {
+    background-color: rgba(0, 94, 168, 0.12);
+    border-color: rgba(0, 94, 168, 0.38);
+}
+
+:root[data-theme="light"] .terminal-layout-button.active,
+:root[data-theme="light"] .tab-item.editor-open .toggle-editor-btn,
+:root[data-theme="light"] .tab-item.agent-open .toggle-agent-btn,
+:root[data-theme="light"] .agent-permission-option.primary {
+    background-color: rgba(0, 94, 168, 0.18);
+    border-color: rgba(0, 94, 168, 0.48);
+    color: var(--text-highlight);
+}
+
+:root[data-theme="light"] .close-tab-button,
+:root[data-theme="light"] .toggle-editor-btn,
+:root[data-theme="light"] .toggle-agent-btn,
+:root[data-theme="light"] .tab-git-action-btn,
+:root[data-theme="light"] .server-delete-button,
+:root[data-theme="light"] .server-auth-button {
+    background-color: var(--control-overlay-bg);
+    border-color: var(--control-overlay-border);
+    color: var(--text-highlight);
+    box-shadow: 0 6px 16px rgba(25, 55, 65, 0.16);
+}
+
+:root[data-theme="light"] .close-tab-button:hover,
+:root[data-theme="light"] .server-delete-button:hover {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    color: #ffffff;
+}
+
+:root[data-theme="light"] .toggle-editor-btn:hover,
+:root[data-theme="light"] .toggle-agent-btn:hover,
+:root[data-theme="light"] .tab-git-action-btn:hover,
+:root[data-theme="light"] .server-auth-button:hover {
+    background-color: var(--control-overlay-hover-bg) !important;
+    border-color: var(--accent-color);
+}
+
+:root[data-theme="light"] .agent-usage-pill::before {
+    background:
+        linear-gradient(
+            90deg,
+            rgba(0, 94, 168, 0.2) 0%,
+            rgba(0, 94, 168, 0.2) calc(var(--agent-usage-progress, 0) * 1%),
+            rgba(18, 61, 75, 0.08) calc(var(--agent-usage-progress, 0) * 1%),
+            rgba(18, 61, 75, 0.08) 100%
+        );
+}
+
+:root[data-theme="light"] .agent-usage-progress {
+    background:
+        repeating-linear-gradient(
+            -45deg,
+            rgba(18, 61, 75, 0.14) 0,
+            rgba(18, 61, 75, 0.14) 2px,
+            rgba(18, 61, 75, 0.04) 2px,
+            rgba(18, 61, 75, 0.04) 4px
+        );
+}
+
+:root[data-theme="light"] .agent-usage-progress-fill {
+    background: rgba(0, 117, 111, 0.82);
+}
+
+:root[data-theme="light"] .mobile-editor-drag-preview,
+:root[data-theme="light"] .mobile-editor-drag-preview::after {
+    background: #fffdf2;
+    color: var(--text-highlight);
+    border-color: rgba(0, 94, 168, 0.65);
+}
+
+:root[data-theme="light"] .mobile-editor-selection-handle::before {
+    box-shadow: 0 0 0 1px rgba(255, 253, 242, 0.92);
+}
+
+:root[data-theme="light"] .mobile-editor-selection-handle::after,
+:root[data-theme="light"] .mobile-editor-drag-preview,
+:root[data-theme="light"] .file-tree-context-menu,
+:root[data-theme="light"] .toast {
+    box-shadow: 0 8px 24px rgba(25, 55, 65, 0.24);
+}
+
+:root[data-theme="light"] kbd {
+    background-color: #efe5b6;
+    border-color: rgba(18, 61, 75, 0.28);
+    color: var(--text-highlight);
+    box-shadow: 0 2px 0 rgba(25, 55, 65, 0.18);
+}
+
+:root[data-theme="light"] .progress-bar,
+:root[data-theme="light"] .agent-path-link.more,
+:root[data-theme="light"] .agent-panel-button:disabled,
+:root[data-theme="light"] .agent-panel-mode-select:disabled,
+:root[data-theme="light"] .agent-panel-button:disabled:hover,
+:root[data-theme="light"] .agent-panel-button:disabled:focus-visible,
+:root[data-theme="light"] .agent-panel-mode-select:disabled:hover,
+:root[data-theme="light"] .agent-panel-mode-select:disabled:focus-visible {
+    background-color: rgba(18, 61, 75, 0.08);
+}
+
+:root[data-theme="light"] .file-tree-rename-input,
+:root[data-theme="light"] .editor-tab-list-popover,
+:root[data-theme="light"] .agent-message-body.markdown code,
+:root[data-theme="light"] .agent-message-body.markdown pre,
+:root[data-theme="light"] .agent-message-attachment,
+:root[data-theme="light"] .agent-attachment-chip,
+:root[data-theme="light"] .agent-panel-input,
+:root[data-theme="light"] .agent-command-menu,
+:root[data-theme="light"] .agent-queue-item,
+:root[data-theme="light"] .agent-dropdown-info,
+:root[data-theme="light"] .pdf-preview-container {
+    background-color: rgba(255, 253, 242, 0.9);
+    border-color: rgba(18, 61, 75, 0.22);
+    color: var(--text-highlight);
+}
+
+:root[data-theme="light"] .agent-message-body.markdown pre code {
+    background: transparent;
+    border-color: transparent;
+}
+
+:root[data-theme="light"] .agent-command-menu,
+:root[data-theme="light"] .editor-tab-list-popover {
+    box-shadow: 0 12px 28px rgba(25, 55, 65, 0.2);
+}
+
+:root[data-theme="light"] .agent-command-option:hover,
+:root[data-theme="light"] .agent-command-option.active,
+:root[data-theme="light"] .editor-tab-list-row.active,
+:root[data-theme="light"] .editor-tab-list-row:hover,
+:root[data-theme="light"] .agent-panel-composer.drag-over {
+    background-color: rgba(0, 94, 168, 0.12);
+    border-color: rgba(0, 94, 168, 0.34);
+}
+
+:root[data-theme="light"] .pdf-preview-container,
+:root[data-theme="light"] .markdown-preview-container {
+    background: linear-gradient(180deg, #f8f3dc, #efe5b6);
+}
+
+:root[data-theme="light"] .pdf-preview-status-secondary {
+    color: var(--text-muted);
+}
+
+:root[data-theme="light"] .pdf-preview-page canvas,
+:root[data-theme="light"] .image-preview-container img {
+    box-shadow:
+        0 12px 32px rgba(25, 55, 65, 0.2),
+        0 0 0 1px rgba(18, 61, 75, 0.14);
 }
 
 .toast-title {

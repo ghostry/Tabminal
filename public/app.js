@@ -33,6 +33,7 @@ const {
 } = await import(`./modules/notifications.js${LOCAL_MODULE_VERSION}`);
 
 const DEPRECATED_AUTH_TOKEN_STORAGE_PREFIX = 'tabminal_auth_token:';
+const APP_THEME_STORAGE_KEY = 'tabminal_theme';
 const WEBSOCKET_PROTOCOL = 'tabminal.v1';
 const WEBSOCKET_AUTH_PROTOCOL_PREFIX = 'tabminal.auth.';
 const EDITOR_WORD_WRAP_STORAGE_KEY = 'tabminal_editor_word_wrap';
@@ -73,6 +74,7 @@ const passwordInput = document.getElementById('password-input');
 const loginError = document.getElementById('login-error');
 const serverControlsEl = document.getElementById('server-controls');
 const addServerButton = document.getElementById('add-server-button');
+const themeToggleButton = document.getElementById('theme-toggle-button');
 const addServerModal = document.getElementById('add-server-modal');
 const addServerForm = document.getElementById('add-server-form');
 const addServerUrlInput = document.getElementById('server-url-input');
@@ -223,22 +225,71 @@ const EDITOR_TAB_LIST_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14
 const TERMINAL_FONT_FAMILY = '\'Monaspace Neon\', "SF Mono Terminal", '
     + '"SFMono-Regular", "SF Mono", "JetBrains Mono", Menlo, Consolas, '
     + 'monospace';
-const MAIN_TERMINAL_THEME = {
-    background: '#002b36',
-    foreground: '#839496',
-    cursor: '#93a1a1',
-    cursorAccent: '#002b36',
-    selectionBackground: '#2a6473',
-    selectionForeground: '#fdf6e3',
-    overviewRulerBorder: '#073642'
+const APP_THEMES = {
+    dark: {
+        label: '亮色',
+        nextLabel: '切换亮色主题',
+        colorScheme: 'dark',
+        themeColor: '#002b36',
+        terminal: {
+            background: '#002b36',
+            foreground: '#839496',
+            cursor: '#93a1a1',
+            cursorAccent: '#002b36',
+            selectionBackground: '#2a6473',
+            selectionForeground: '#fdf6e3',
+            overviewRulerBorder: '#073642'
+        }
+    },
+    light: {
+        label: '暗色',
+        nextLabel: '切换暗色主题',
+        colorScheme: 'light',
+        themeColor: '#f8f3dc',
+        terminal: {
+            background: '#f8f3dc',
+            foreground: '#102f38',
+            cursor: '#071f28',
+            cursorAccent: '#f8f3dc',
+            selectionBackground: '#ffd166',
+            selectionForeground: '#071f28',
+            overviewRulerBorder: '#d7c982',
+            black: '#073642',
+            red: '#b41414',
+            green: '#516d00',
+            yellow: '#8a5a00',
+            blue: '#005ea8',
+            magenta: '#a02f7b',
+            cyan: '#00756f',
+            white: '#e6dfbf',
+            brightBlack: '#476570',
+            brightRed: '#d32222',
+            brightGreen: '#668500',
+            brightYellow: '#a86f00',
+            brightBlue: '#006fbd',
+            brightMagenta: '#ba3b8f',
+            brightCyan: '#00877f',
+            brightWhite: '#fffdf2'
+        }
+    }
 };
 const TERMINAL_SEARCH_DECORATIONS = {
-    matchBackground: '#073642',
-    matchBorder: '#2aa198',
-    matchOverviewRuler: '#2aa198',
-    activeMatchBackground: '#0b4f5d',
-    activeMatchBorder: '#b58900',
-    activeMatchColorOverviewRuler: '#b58900'
+    dark: {
+        matchBackground: '#073642',
+        matchBorder: '#2aa198',
+        matchOverviewRuler: '#2aa198',
+        activeMatchBackground: '#0b4f5d',
+        activeMatchBorder: '#b58900',
+        activeMatchColorOverviewRuler: '#b58900'
+    },
+    light: {
+        matchBackground: '#f1dc8f',
+        matchBorder: '#00756f',
+        matchOverviewRuler: '#00756f',
+        activeMatchBackground: '#ffd166',
+        activeMatchBorder: '#8a5a00',
+        activeMatchColorOverviewRuler: '#8a5a00'
+    }
 };
 const TERMINAL_LIGATURE_FEATURE_SETTINGS = '"calt" on, "liga" on';
 const serverModalState = {
@@ -448,9 +499,48 @@ function getTerminalFontSize() {
     return 12;
 }
 
+function normalizeAppThemeName(theme) {
+    return theme === 'light' ? 'light' : 'dark';
+}
+
+function readStoredAppTheme() {
+    try {
+        return normalizeAppThemeName(localStorage.getItem(APP_THEME_STORAGE_KEY));
+    } catch {
+        return 'dark';
+    }
+}
+
+let currentAppTheme = normalizeAppThemeName(
+    document.documentElement.dataset.theme || readStoredAppTheme()
+);
+
+function getCurrentAppThemeConfig() {
+    return APP_THEMES[currentAppTheme] || APP_THEMES.dark;
+}
+
+function getMonacoThemeName() {
+    return currentAppTheme === 'light' ? 'tabminal-light' : 'solarized-dark';
+}
+
 function buildMainTerminalTheme() {
     return {
-        ...MAIN_TERMINAL_THEME
+        ...getCurrentAppThemeConfig().terminal
+    };
+}
+
+function buildPreviewTerminalTheme() {
+    return {
+        ...buildMainTerminalTheme(),
+        cursor: 'transparent',
+        selectionBackground: 'transparent'
+    };
+}
+
+function buildTerminalSearchDecorations() {
+    return {
+        ...(TERMINAL_SEARCH_DECORATIONS[currentAppTheme]
+            || TERMINAL_SEARCH_DECORATIONS.dark)
     };
 }
 
@@ -5333,7 +5423,7 @@ class EditorManager {
                 this.diffEditorContainer,
                 {
                     readOnly: true,
-                    theme: 'solarized-dark',
+                    theme: getMonacoThemeName(),
                     automaticLayout: true,
                     scrollBeyondLastLine: false,
                     minimap: { enabled: false },
@@ -6805,6 +6895,61 @@ class EditorManager {
         });
     }
 
+    defineMonacoThemes(monaco) {
+        monaco.editor.defineTheme('solarized-dark', {
+            base: 'vs-dark',
+            inherit: true,
+            rules: [
+                { token: '', background: '002b36', foreground: '839496' },
+                { token: 'keyword', foreground: '859900' },
+                { token: 'string', foreground: '2aa198' },
+                { token: 'number', foreground: 'd33682' },
+                { token: 'comment', foreground: '586e75' },
+            ],
+            colors: {
+                'editor.background': '#002b36',
+                'editor.foreground': '#839496',
+                'editorCursor.foreground': '#93a1a1',
+                'editor.selectionBackground': '#2a6473',
+                'editor.inactiveSelectionBackground': '#1b4d5a',
+                'editor.selectionHighlightBackground': '#2a647380',
+                'editor.lineHighlightBackground': '#073642',
+                'editorLineNumber.foreground': '#586e75',
+            }
+        });
+        monaco.editor.defineTheme('tabminal-light', {
+            base: 'vs',
+            inherit: true,
+            rules: [
+                { token: '', background: 'f8f3dc', foreground: '102f38' },
+                { token: 'keyword', foreground: '516d00' },
+                { token: 'string', foreground: '00756f' },
+                { token: 'number', foreground: 'a02f7b' },
+                { token: 'comment', foreground: '476570' },
+            ],
+            colors: {
+                'editor.background': '#f8f3dc',
+                'editor.foreground': '#102f38',
+                'editorCursor.foreground': '#071f28',
+                'editor.selectionBackground': '#ffd166',
+                'editor.inactiveSelectionBackground': '#f1dc8f',
+                'editor.selectionHighlightBackground': '#ffd16666',
+                'editor.lineHighlightBackground': '#fff8cc',
+                'editorLineNumber.foreground': '#476570',
+            }
+        });
+    }
+
+    applyTheme() {
+        if (!this.monacoInstance) return;
+        const themeName = getMonacoThemeName();
+        this.monacoInstance.editor.setTheme(themeName);
+        this.diffEditor?.updateOptions?.({ theme: themeName });
+        for (const diffEntry of this.diffFiles?.values?.() || []) {
+            diffEntry.diffEditor?.updateOptions?.({ theme: themeName });
+        }
+    }
+
     initMonaco() {
         require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs' }});
         require(['vs/editor/editor.main'], (monaco) => {
@@ -6812,7 +6957,7 @@ class EditorManager {
             this.editor = monaco.editor.create(this.monacoContainer, {
                 value: '',
                 language: 'plaintext',
-                theme: 'solarized-dark',
+                theme: getMonacoThemeName(),
                 automaticLayout: false,
                 contextmenu: !IS_MOBILE,
                 minimap: { enabled: true },
@@ -6873,28 +7018,8 @@ class EditorManager {
             });
             this.setupMobileEditorContextMenu();
             
-            monaco.editor.defineTheme('solarized-dark', {
-                base: 'vs-dark',
-                inherit: true,
-                rules: [
-                    { token: '', background: '002b36', foreground: '839496' },
-                    { token: 'keyword', foreground: '859900' },
-                    { token: 'string', foreground: '2aa198' },
-                    { token: 'number', foreground: 'd33682' },
-                    { token: 'comment', foreground: '586e75' },
-                ],
-                colors: {
-                    'editor.background': '#002b36',
-                    'editor.foreground': '#839496',
-                    'editorCursor.foreground': '#93a1a1',
-                    'editor.selectionBackground': '#2a6473',
-                    'editor.inactiveSelectionBackground': '#1b4d5a',
-                    'editor.selectionHighlightBackground': '#2a647380',
-                    'editor.lineHighlightBackground': '#073642',
-                    'editorLineNumber.foreground': '#586e75',
-                }
-            });
-            monaco.editor.setTheme('solarized-dark');
+            this.defineMonacoThemes(monaco);
+            this.applyTheme();
             
             // Process pending models
             for (const server of state.servers.values()) {
@@ -10371,7 +10496,7 @@ class EditorManager {
             {
                 model,
                 readOnly: true,
-                theme: 'solarized-dark',
+                theme: getMonacoThemeName(),
                 automaticLayout: true,
                 scrollBeyondLastLine: false,
                 minimap: { enabled: false },
@@ -10606,7 +10731,7 @@ class EditorManager {
             diffNode,
             {
                 readOnly: true,
-                theme: 'solarized-dark',
+                theme: getMonacoThemeName(),
                 automaticLayout: true,
                 scrollBeyondLastLine: false,
                 minimap: { enabled: false },
@@ -12422,12 +12547,7 @@ class Session {
             fontSize: 10,
             rows: this.rows,
             cols: this.cols,
-            theme: {
-                background: '#002b36',
-                foreground: '#839496',
-                cursor: 'transparent',
-                selectionBackground: 'transparent'
-            }
+            theme: buildPreviewTerminalTheme()
         }));
 
         if (window.innerWidth >= 768) {
@@ -12506,6 +12626,17 @@ class Session {
                 void this.loadOlderTerminalHistory();
             }
         });
+    }
+
+    applyTheme() {
+        if (this.previewTerm) {
+            this.previewTerm.options.theme = buildPreviewTerminalTheme();
+            this.previewTerm.refresh?.(0, Math.max(0, this.previewTerm.rows - 1));
+        }
+        if (this.mainTerm) {
+            this.mainTerm.options.theme = buildMainTerminalTheme();
+            this.mainTerm.refresh?.(0, Math.max(0, this.mainTerm.rows - 1));
+        }
     }
 
     activateMainTerminalDeferredAddons() {
@@ -15159,6 +15290,50 @@ const state = {
     activeSessionKey: null,
     serverRegistryLoaded: false
 };
+
+function updateThemeToggleButton() {
+    if (!themeToggleButton) return;
+    const config = getCurrentAppThemeConfig();
+    const textEl = themeToggleButton.querySelector('.theme-toggle-text');
+    if (textEl) textEl.textContent = config.label;
+    themeToggleButton.setAttribute('aria-label', config.nextLabel);
+    themeToggleButton.title = config.nextLabel;
+    themeToggleButton.setAttribute('aria-pressed', currentAppTheme === 'light' ? 'true' : 'false');
+}
+
+function refreshTerminalThemes() {
+    for (const session of state.sessions.values()) {
+        session.applyTheme?.();
+    }
+}
+
+function applyAppTheme(theme, { persist = false } = {}) {
+    currentAppTheme = normalizeAppThemeName(theme);
+    const config = getCurrentAppThemeConfig();
+    document.documentElement.dataset.theme = currentAppTheme;
+    document.documentElement.style.colorScheme = config.colorScheme;
+    document.querySelector('meta[name="theme-color"]')
+        ?.setAttribute('content', config.themeColor);
+    if (persist) {
+        try {
+            localStorage.setItem(APP_THEME_STORAGE_KEY, currentAppTheme);
+        } catch {
+            // Ignore storage failures; the in-session theme still applies.
+        }
+    }
+    updateThemeToggleButton();
+    refreshTerminalThemes();
+    editorManager?.applyTheme?.();
+}
+
+function toggleAppTheme() {
+    applyAppTheme(currentAppTheme === 'light' ? 'dark' : 'light', {
+        persist: true
+    });
+}
+
+applyAppTheme(currentAppTheme);
+themeToggleButton?.addEventListener('click', toggleAppTheme);
 
 const pendingChanges = {
     sessions: new Map() // sessionKey -> { resize, workspaceState, fileWrites: Map<path, content> }
@@ -22257,7 +22432,7 @@ function buildTerminalSearchOptions(options = {}) {
     return {
         ...searchOptions,
         ...options,
-        decorations: TERMINAL_SEARCH_DECORATIONS
+        decorations: buildTerminalSearchDecorations()
     };
 }
 
