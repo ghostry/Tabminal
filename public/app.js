@@ -659,6 +659,22 @@ function attachTerminalToHost(term, host) {
     return false;
 }
 
+function scrollTerminalToBottomSoon(term) {
+    if (!term) return;
+    const scrollToBottom = () => {
+        try {
+            term.scrollToBottom?.();
+        } catch {
+            // Ignore terminal viewport restoration failures.
+        }
+    };
+    scrollToBottom();
+    requestAnimationFrame(() => {
+        scrollToBottom();
+        requestAnimationFrame(scrollToBottom);
+    });
+}
+
 function workspaceKeyToFilePath(key) {
     if (typeof key !== 'string' || key.length === 0) return '';
     if (key.startsWith(MARKDOWN_PREVIEW_WORKSPACE_TAB_PREFIX)) {
@@ -12707,6 +12723,7 @@ class Session {
             }
             this.bindTerminalControlClaim();
             if (this.fitMainTerminalIfVisible()) {
+                scrollTerminalToBottomSoon(this.mainTerm);
                 this.mainTerm.focus();
             }
         }
@@ -13075,15 +13092,18 @@ class Session {
                     total: this.loadedTerminalText.length,
                     hasMoreBefore: false
                 });
-                this.recreateTerminals();
-                this.replayLoadedTerminalText(() => {
-                    if (state.activeSessionKey === this.key) {
-                        if (this.fitMainTerminalIfVisible()) {
-                            this.mainTerm.focus();
-                        }
-                        this.reportResize();
+            this.recreateTerminals();
+            this.replayLoadedTerminalText(() => {
+                scrollTerminalToBottomSoon(this.previewTerm);
+                scrollTerminalToBottomSoon(this.mainTerm);
+                if (state.activeSessionKey === this.key) {
+                    if (this.fitMainTerminalIfVisible()) {
+                        scrollTerminalToBottomSoon(this.mainTerm);
+                        this.mainTerm.focus();
                     }
-                });
+                    this.reportResize();
+                }
+            });
                 break;
             case 'output':
                 this.writeToTerminals(message.data);
@@ -13248,7 +13268,8 @@ class Session {
         this.terminalHistoryHasMoreBefore = !!history.hasMoreBefore;
     }
 
-    replayLoadedTerminalText(callback = null) {
+    replayLoadedTerminalText(callback = null, options = {}) {
+        const shouldScrollToBottom = options.scrollToBottom !== false;
         this.isRestoring = true;
         this.previewTerm?.reset?.();
         this.mainTerm?.reset?.();
@@ -13258,6 +13279,10 @@ class Session {
         this.mainTerm.write(this.loadedTerminalText || '', () => {
             this.isRestoring = false;
             this.lastTerminalReplayFinishedAt = Date.now();
+            if (shouldScrollToBottom) {
+                scrollTerminalToBottomSoon(this.previewTerm);
+                scrollTerminalToBottomSoon(this.mainTerm);
+            }
             if (typeof callback === 'function') {
                 callback();
             }
@@ -13306,7 +13331,7 @@ class Session {
                 } catch {
                     // Ignore scroll restoration failures.
                 }
-            });
+            }, { scrollToBottom: false });
         } finally {
             this.terminalHistoryLoading = false;
         }
@@ -14393,7 +14418,7 @@ class AgentTab {
         switch (message.type) {
             case 'snapshot':
                 this.update(message.tab || {});
-                this.scrollToBottomOnNextRender = true;
+                resetAgentTranscriptToLatest(this);
                 notifyOptions = {
                     full: true
                 };
@@ -16938,6 +16963,17 @@ function getAgentTranscriptWindow(
     return { start, end };
 }
 
+function resetAgentTranscriptToLatest(agentTab) {
+    if (!agentTab) return;
+    const total = getAgentTimelineItems(agentTab).length;
+    const latestWindow = getAgentTranscriptWindow(null, total, {
+        pinToBottom: true
+    });
+    agentTab.historyWindowStart = latestWindow.start;
+    agentTab.historyWindowEnd = latestWindow.end;
+    agentTab.scrollToBottomOnNextRender = true;
+}
+
 function isAgentTranscriptWindowNearLatest(agentTab, totalCount = 0) {
     const total = Number.isFinite(totalCount)
         ? Math.max(0, totalCount)
@@ -19465,6 +19501,7 @@ async function recoverServerAfterLongDisconnect(server) {
     }
     const activeAgentTab = getActiveAgentTab();
     if (activeAgentTab?.serverId === server.id) {
+        resetAgentTranscriptToLatest(activeAgentTab);
         activeAgentTab.notifyUi({
             full: true,
             authoritativeSync: true
@@ -21479,6 +21516,8 @@ async function switchToSession(sessionKey, options = {}) {
     const previousSession = state.activeSessionKey
         ? state.sessions.get(state.activeSessionKey)
         : null;
+    const shouldScrollTerminalToBottom = options.scrollTerminalToBottom === true
+        || !previousSession;
     previousSession?.unbindTerminalControlClaim();
 
     state.activeSessionKey = sessionKey;
@@ -21502,6 +21541,9 @@ async function switchToSession(sessionKey, options = {}) {
     }
     session.bindTerminalControlClaim();
     session.fitMainTerminalIfVisible();
+    if (shouldScrollTerminalToBottom) {
+        scrollTerminalToBottomSoon(session.mainTerm);
+    }
     if (session.isMainTerminalVisible()) {
         session.mainTerm.focus();
     }
@@ -21509,6 +21551,9 @@ async function switchToSession(sessionKey, options = {}) {
     // Double check focus
     requestAnimationFrame(() => {
         if (session.isMainTerminalVisible()) {
+            if (shouldScrollTerminalToBottom) {
+                scrollTerminalToBottomSoon(session.mainTerm);
+            }
             session.mainTerm.focus();
         }
     });
