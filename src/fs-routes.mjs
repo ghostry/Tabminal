@@ -361,9 +361,9 @@ export async function resetGitTrackedFile(baseDir, targetPath) {
     };
 }
 
-function lookupStatusForPath(statusMap, repoRoot, baseDir, dirPath, entryPath) {
+function lookupStatusForPath(statusMap, repoRoot, baseDir, entryPath) {
     // Convert entryPath (relative to baseDir) to a path relative to repo root
-    const fullPath = path.resolve(baseDir, dirPath, entryPath);
+    const fullPath = path.resolve(baseDir, entryPath);
     const repoRelative = path.relative(repoRoot, fullPath);
     const normalizedPath = path.normalize(repoRelative);
     // Try direct match
@@ -372,8 +372,171 @@ function lookupStatusForPath(statusMap, repoRoot, baseDir, dirPath, entryPath) {
     // Try matching if any tracked file starts with this path (for directories)
     for (const [key, st] of statusMap) {
         if (key.startsWith(normalizedPath + path.sep)) return st;
+        if (
+            (st[0] === '?' || st[1] === '?')
+            && normalizedPath.startsWith(key + path.sep)
+        ) {
+            return st;
+        }
     }
     return null;
+}
+
+export async function readDirectoryListing(baseDir, dirPath = '.') {
+    const fullPath = resolvePath(baseDir, dirPath);
+    const stats = await fs.stat(fullPath);
+
+    if (!stats.isDirectory()) {
+        const error = createFsRouteError('Not a directory', 400);
+        throw error;
+    }
+
+    let renameable = false;
+    try {
+        await fs.access(fullPath, fsConstants.W_OK);
+        renameable = true;
+    } catch {
+        renameable = false;
+    }
+
+    // Run git status once upfront
+    const gitData = await getGitStatusMap(fullPath);
+
+    const dirents = await fs.readdir(fullPath, { withFileTypes: true });
+
+    const items = await Promise.all(
+        dirents
+            .filter(dirent => dirent.name !== '.DS_Store')
+            .map(async (dirent) => {
+                const entryPath = path.join(dirPath, dirent.name);
+
+                if (dirent.isDirectory()) {
+                    // Collect statuses for the directory itself and direct children.
+                    const dirGitStatuses = [];
+                    if (gitData) {
+                        const directStatus = lookupStatusForPath(
+                            gitData.statusMap,
+                            gitData.repoRoot,
+                            baseDir,
+                            entryPath
+                        );
+                        if (directStatus) {
+                            dirGitStatuses.push(directStatus);
+                        }
+                    }
+                    try {
+                        const fullEntryPath = resolvePath(baseDir, entryPath);
+                        const children = await fs.readdir(
+                            fullEntryPath,
+                            { withFileTypes: true }
+                        );
+                        for (const child of children) {
+                            const childRelPath = path.join(entryPath, child.name);
+                            let st = null;
+                            if (gitData) {
+                                st = lookupStatusForPath(
+                                    gitData.statusMap,
+                                    gitData.repoRoot,
+                                    baseDir,
+                                    childRelPath
+                                );
+                            }
+                            if (st) {
+                                dirGitStatuses.push(st);
+                            }
+                        }
+                    } catch {
+                        // ignore
+                    }
+
+                    if (dirGitStatuses.length === 0) {
+                        return {
+                            name: dirent.name,
+                            isDirectory: true,
+                            path: entryPath,
+                            renameable,
+                            deleteable: renameable,
+                            gitStatus: null
+                        };
+                    }
+
+                    const modified = dirGitStatuses.some(s => s[1] === 'M');
+                    const untracked = dirGitStatuses.some(s => s[0] === '?' || s[1] === '?');
+                    const staged = dirGitStatuses.some(s => s[0] !== ' ' && s[0] !== '?');
+                    const deleted = dirGitStatuses.some(s => s[1] === 'D' || s[0] === 'D');
+
+                    if (modified && untracked && staged && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-all' };
+                    } else if (modified && untracked && staged) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked-staged' };
+                    } else if (modified && untracked && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked-deleted' };
+                    } else if (modified && staged && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-staged-deleted' };
+                    } else if (untracked && staged && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-staged-deleted' };
+                    } else if (modified && untracked) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked' };
+                    } else if (modified && staged) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-staged' };
+                    } else if (modified && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-deleted' };
+                    } else if (untracked && staged) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-staged' };
+                    } else if (untracked && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-deleted' };
+                    } else if (staged && deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-staged-deleted' };
+                    } else if (modified) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'M' };
+                    } else if (untracked) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: '?' };
+                    } else if (staged) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'A' };
+                    } else if (deleted) {
+                        return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'D' };
+                    }
+                }
+
+                // For files, lookup from Map
+                let fileStatus = null;
+                if (gitData) {
+                    fileStatus = lookupStatusForPath(
+                        gitData.statusMap,
+                        gitData.repoRoot,
+                        baseDir,
+                        entryPath
+                    );
+                }
+                return {
+                    name: dirent.name,
+                    isDirectory: false,
+                    path: entryPath,
+                    renameable,
+                    deleteable: renameable,
+                    gitStatus: fileStatus || null
+                };
+            })
+    );
+
+    // Sort: Directories first, then files
+    items.sort((a, b) => {
+        if (a.isDirectory === b.isDirectory) {
+            return a.name.localeCompare(b.name);
+        }
+        return a.isDirectory ? -1 : 1;
+    });
+
+    return {
+        items,
+        creatable: renameable,
+        git: gitData
+            ? {
+                ahead: gitData.ahead || 0,
+                hasPushableChanges: (gitData.ahead || 0) > 0
+            }
+            : null
+    };
 }
 
 export const setupFsRoutes = (router) => {
@@ -383,139 +546,10 @@ export const setupFsRoutes = (router) => {
     router.get('/api/fs/list', async (ctx) => {
         const dirPath = ctx.query.path || '.';
         try {
-            const fullPath = resolvePath(baseDir, dirPath);
-            const stats = await fs.stat(fullPath);
-
-            if (!stats.isDirectory()) {
-                ctx.status = 400;
-                ctx.body = { error: 'Not a directory' };
-                return;
-            }
-
-            let renameable = false;
-            try {
-                await fs.access(fullPath, fsConstants.W_OK);
-                renameable = true;
-            } catch {
-                renameable = false;
-            }
-
-            // Run git status once upfront
-            const gitData = await getGitStatusMap(fullPath);
-
-            const dirents = await fs.readdir(fullPath, { withFileTypes: true });
-
-            const items = await Promise.all(
-                dirents
-                    .filter(dirent => dirent.name !== '.DS_Store')
-                    .map(async (dirent) => {
-                        const entryPath = path.join(dirPath, dirent.name);
-
-                        if (dirent.isDirectory()) {
-                            // Collect statuses of direct children via Map lookup
-                            const dirGitStatuses = [];
-                            try {
-                                const children = await fs.readdir(entryPath, { withFileTypes: true });
-                                for (const child of children) {
-                                    const childRelPath = path.join(dirPath, dirent.name, child.name);
-                                    let st = null;
-                                    if (gitData) {
-                                        st = lookupStatusForPath(gitData.statusMap, gitData.repoRoot, baseDir, dirPath, childRelPath);
-                                    }
-                                    if (st) {
-                                        dirGitStatuses.push(st);
-                                    }
-                                }
-                            } catch {
-                                // ignore
-                            }
-
-                            if (dirGitStatuses.length === 0) {
-                                return {
-                                    name: dirent.name,
-                                    isDirectory: true,
-                                    path: entryPath,
-                                    renameable,
-                                    deleteable: renameable,
-                                    gitStatus: null
-                                };
-                            }
-
-                            const modified = dirGitStatuses.some(s => s[1] === 'M');
-                            const untracked = dirGitStatuses.some(s => s[1] === '?');
-                            const staged = dirGitStatuses.some(s => s[0] !== ' ' && s[0] !== '?');
-                            const deleted = dirGitStatuses.some(s => s[1] === 'D' || s[0] === 'D');
-
-                            if (modified && untracked && staged && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-all' };
-                            } else if (modified && untracked && staged) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked-staged' };
-                            } else if (modified && untracked && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked-deleted' };
-                            } else if (modified && staged && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-staged-deleted' };
-                            } else if (untracked && staged && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-staged-deleted' };
-                            } else if (modified && untracked) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-untracked' };
-                            } else if (modified && staged) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-staged' };
-                            } else if (modified && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-modified-deleted' };
-                            } else if (untracked && staged) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-staged' };
-                            } else if (untracked && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-untracked-deleted' };
-                            } else if (staged && deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'mixed-staged-deleted' };
-                            } else if (modified) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'M' };
-                            } else if (untracked) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: '?' };
-                            } else if (staged) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'A' };
-                            } else if (deleted) {
-                                return { name: dirent.name, isDirectory: true, path: entryPath, renameable, deleteable: renameable, gitStatus: 'D' };
-                            }
-                        }
-
-                        // For files, lookup from Map
-                        let fileStatus = null;
-                        if (gitData) {
-                            fileStatus = lookupStatusForPath(gitData.statusMap, gitData.repoRoot, baseDir, dirPath, entryPath);
-                        }
-                        return {
-                            name: dirent.name,
-                            isDirectory: false,
-                            path: entryPath,
-                            renameable,
-                            deleteable: renameable,
-                            gitStatus: fileStatus || null
-                        };
-                    })
-            );
-
-            // Sort: Directories first, then files
-            items.sort((a, b) => {
-                if (a.isDirectory === b.isDirectory) {
-                    return a.name.localeCompare(b.name);
-                }
-                return a.isDirectory ? -1 : 1;
-            });
-
-            ctx.body = {
-                items,
-                creatable: renameable,
-                git: gitData
-                    ? {
-                        ahead: gitData.ahead || 0,
-                        hasPushableChanges: (gitData.ahead || 0) > 0
-                    }
-                    : null
-            };
+            ctx.body = await readDirectoryListing(baseDir, dirPath);
         } catch (err) {
             console.error('FS List Error:', err);
-            ctx.status = 500;
+            ctx.status = err?.status || 500;
             ctx.body = { error: err.message };
         }
     });

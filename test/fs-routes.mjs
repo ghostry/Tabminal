@@ -11,6 +11,7 @@ import {
     createUniqueChild,
     ensureRenameTargetAvailable,
     isSupportedTextBuffer,
+    readDirectoryListing,
     readTextFileSnapshot,
     readGitStatusSummary,
     resetGitTrackedFile,
@@ -196,6 +197,48 @@ describe('FS text snapshot versioning', () => {
 });
 
 describe('FS git reset', () => {
+    it('reports untracked files from nested directory listings', async () => {
+        const tempDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'tabminal-fs-routes-')
+        );
+        try {
+            const repoDir = path.join(tempDir, 'repo');
+            const subDir = path.join(repoDir, 'sub');
+            await fs.mkdir(subDir, { recursive: true });
+
+            await execFileAsync('git', ['init'], { cwd: repoDir });
+            await fs.writeFile(path.join(subDir, 'new.txt'), 'new\n', 'utf8');
+
+            const listing = await readDirectoryListing(repoDir, 'sub');
+            const item = listing.items.find((entry) => entry.name === 'new.txt');
+
+            assert.equal(item?.gitStatus, '??');
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
+    });
+
+    it('reports untracked directories from their direct git status', async () => {
+        const tempDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'tabminal-fs-routes-')
+        );
+        try {
+            const repoDir = path.join(tempDir, 'repo');
+            const docsDir = path.join(repoDir, 'docs');
+            await fs.mkdir(docsDir, { recursive: true });
+
+            await execFileAsync('git', ['init'], { cwd: repoDir });
+            await fs.writeFile(path.join(docsDir, 'new.txt'), 'new\n', 'utf8');
+
+            const listing = await readDirectoryListing(repoDir, '.');
+            const item = listing.items.find((entry) => entry.name === 'docs');
+
+            assert.equal(item?.gitStatus, '?');
+        } finally {
+            await fs.rm(tempDir, { recursive: true, force: true });
+        }
+    });
+
     it('returns push status summary without listing files', async () => {
         const tempDir = await fs.mkdtemp(
             path.join(os.tmpdir(), 'tabminal-fs-routes-')
