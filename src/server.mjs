@@ -63,6 +63,30 @@ function debugLog(...args) {
     }
 }
 
+function isClientAbortError(error) {
+    return error?.code === 'ERR_STREAM_PREMATURE_CLOSE'
+        || error?.code === 'ECONNRESET'
+        || error?.name === 'AbortError';
+}
+
+app.use(async (ctx, next) => {
+    try {
+        await next();
+    } catch (error) {
+        if (isClientAbortError(error)) {
+            return;
+        }
+        throw error;
+    }
+});
+
+app.on('error', (error) => {
+    if (isClientAbortError(error)) {
+        return;
+    }
+    console.error('[Server] HTTP error:', error?.message || error);
+});
+
 function parseMultipartForm(req, options = {}) {
     return new Promise((resolve, reject) => {
         const form = formidable({
@@ -332,6 +356,11 @@ const acpManager = new AcpManager({ terminalManager });
             }
         }
         await acpManager.restoreTabs(new Set(terminalManager.sessions.keys()));
+    } catch (error) {
+        console.error(
+            '[Server] Failed to restore persisted sessions:',
+            error?.message || error
+        );
     } finally {
         acpManager.restoring = false;
     }

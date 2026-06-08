@@ -5748,6 +5748,7 @@ export class AcpManager extends EventEmitter {
         const dedupedTabs = dedupeSerializedTabs(await this.loadTabs());
         const entries = dedupedTabs.tabs;
         let changed = false;
+        let skippedDuringRestore = false;
         if (dedupedTabs.changed) {
             changed = true;
         }
@@ -5757,14 +5758,14 @@ export class AcpManager extends EventEmitter {
                 meta.acpSessionId
             );
             if (existingTab) {
-                changed = true;
+                skippedDuringRestore = true;
                 continue;
             }
             if (
                 meta.terminalSessionId
                 && !validTerminalSessionIds.has(meta.terminalSessionId)
             ) {
-                changed = true;
+                skippedDuringRestore = true;
                 continue;
             }
 
@@ -5772,13 +5773,13 @@ export class AcpManager extends EventEmitter {
                 (entry) => entry.id === meta.agentId
             );
             if (!definition) {
-                changed = true;
+                skippedDuringRestore = true;
                 continue;
             }
 
             const availability = this.getDefinitionAvailability(definition);
             if (!availability.available) {
-                changed = true;
+                skippedDuringRestore = true;
                 continue;
             }
 
@@ -5810,7 +5811,7 @@ export class AcpManager extends EventEmitter {
                 this.#markTabChanged(meta.id);
                 this.#clearDefinitionAvailabilityOverride(definition.id);
             } catch (error) {
-                changed = true;
+                skippedDuringRestore = true;
                 console.warn(
                     `[ACP] Failed to restore agent tab ${meta.id}:`,
                     error?.message || error
@@ -5818,7 +5819,7 @@ export class AcpManager extends EventEmitter {
             }
         }
 
-        if (changed) {
+        if (changed && !skippedDuringRestore) {
             await this.persistTabs();
         }
     }

@@ -12,6 +12,40 @@ const AGENT_CONFIG_FILE = path.join(BASE_DIR, 'agent-config.json');
 const AUTH_SESSIONS_FILE = path.join(BASE_DIR, 'auth-sessions.json');
 const getSessionSnapshotPath = (id) => path.join(SESSIONS_DIR, `${id}.snapshot`);
 
+const JSON_READ_RETRIES = 3;
+const JSON_READ_RETRY_DELAY_MS = 25;
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readJsonFile(filePath, fallback, options = {}) {
+    const retries = Number.isInteger(options.retries)
+        ? options.retries
+        : JSON_READ_RETRIES;
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            return JSON.parse(content);
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                return fallback;
+            }
+            if (attempt >= retries) {
+                throw error;
+            }
+            await sleep(JSON_READ_RETRY_DELAY_MS);
+        }
+    }
+    return fallback;
+}
+
+async function writeJsonFileAtomic(filePath, data) {
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(data, null, 2));
+    await fs.rename(tempPath, filePath);
+}
+
 // Ensure directories exist
 const init = async () => {
     try {
@@ -41,7 +75,7 @@ export const saveSession = async (id, data) => {
             workspaceState: data.editorState || {},
             executions: data.executions || []
         };
-        await fs.writeFile(filePath, JSON.stringify(serializable, null, 2));
+        await writeJsonFileAtomic(filePath, serializable);
     } catch (e) {
         console.error(`[Persistence] Failed to save session ${id}:`, e);
     }
@@ -79,20 +113,23 @@ export const loadSessions = async () => {
         for (const file of files) {
             if (file.endsWith('.json')) {
                 try {
-                    const content = await fs.readFile(path.join(SESSIONS_DIR, file), 'utf-8');
-                    sessions.push(JSON.parse(content));
+                    sessions.push(await readJsonFile(
+                        path.join(SESSIONS_DIR, file),
+                        null
+                    ));
                 } catch (e) {
-                    console.warn(`[Persistence] Failed to parse session file ${file}, deleting it:`, e);
-                    try {
-                        await fs.unlink(path.join(SESSIONS_DIR, file));
-                    } catch (delErr) {
-                        console.error(`[Persistence] Failed to delete corrupted file ${file}:`, delErr);
-                    }
+                    console.warn(
+                        `[Persistence] Failed to parse session file ${file}, `
+                        + 'keeping it for recovery:',
+                        e
+                    );
                 }
             }
         }
         // Sort by creation time if possible, or just return
-        return sessions.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+        return sessions
+            .filter(Boolean)
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     } catch (e) {
         console.error('[Persistence] Failed to load sessions:', e);
         return [];
@@ -108,8 +145,7 @@ const defaultMemory = {
 export const loadMemory = async () => {
     await init();
     try {
-        const content = await fs.readFile(MEMORY_FILE, 'utf-8');
-        return { ...defaultMemory, ...JSON.parse(content) };
+        return { ...defaultMemory, ...await readJsonFile(MEMORY_FILE, {}) };
     } catch {
         return defaultMemory;
     }
@@ -118,7 +154,7 @@ export const loadMemory = async () => {
 export const saveMemory = async (memory) => {
     await init();
     try {
-        await fs.writeFile(MEMORY_FILE, JSON.stringify(memory, null, 2));
+        await writeJsonFileAtomic(MEMORY_FILE, memory);
     } catch (e) {
         console.error('[Persistence] Failed to save memory:', e);
     }
@@ -174,8 +210,7 @@ function normalizeClusterServers(servers) {
 export const loadCluster = async () => {
     await init();
     try {
-        const content = await fs.readFile(CLUSTER_FILE, 'utf-8');
-        const parsed = JSON.parse(content);
+        const parsed = await readJsonFile(CLUSTER_FILE, null);
         if (Array.isArray(parsed)) {
             return normalizeClusterServers(parsed);
         }
@@ -190,7 +225,7 @@ export const saveCluster = async (servers) => {
     const normalized = normalizeClusterServers(servers);
     const payload = { servers: normalized };
     try {
-        await fs.writeFile(CLUSTER_FILE, JSON.stringify(payload, null, 2));
+        await writeJsonFileAtomic(CLUSTER_FILE, payload);
     } catch (e) {
         console.error('[Persistence] Failed to save cluster:', e);
         throw e;
@@ -248,8 +283,7 @@ function normalizeAuthSessions(sessions) {
 export const loadAuthSessions = async () => {
     await init();
     try {
-        const content = await fs.readFile(AUTH_SESSIONS_FILE, 'utf-8');
-        const parsed = JSON.parse(content);
+        const parsed = await readJsonFile(AUTH_SESSIONS_FILE, null);
         if (Array.isArray(parsed)) {
             return normalizeAuthSessions(parsed);
         }
@@ -264,7 +298,7 @@ export const saveAuthSessions = async (sessions) => {
     const normalized = normalizeAuthSessions(sessions);
     const payload = { sessions: normalized };
     try {
-        await fs.writeFile(AUTH_SESSIONS_FILE, JSON.stringify(payload, null, 2));
+        await writeJsonFileAtomic(AUTH_SESSIONS_FILE, payload);
     } catch (e) {
         console.error('[Persistence] Failed to save auth sessions:', e);
         throw e;
@@ -352,8 +386,7 @@ function normalizeAgentTabs(tabs) {
 export const loadAgentTabs = async () => {
     await init();
     try {
-        const content = await fs.readFile(AGENT_TABS_FILE, 'utf-8');
-        const parsed = JSON.parse(content);
+        const parsed = await readJsonFile(AGENT_TABS_FILE, null);
         if (Array.isArray(parsed)) {
             return normalizeAgentTabs(parsed);
         }
@@ -368,7 +401,7 @@ export const saveAgentTabs = async (tabs) => {
     const normalized = normalizeAgentTabs(tabs);
     const payload = { tabs: normalized };
     try {
-        await fs.writeFile(AGENT_TABS_FILE, JSON.stringify(payload, null, 2));
+        await writeJsonFileAtomic(AGENT_TABS_FILE, payload);
     } catch (e) {
         console.error('[Persistence] Failed to save agent tabs:', e);
         throw e;
@@ -402,8 +435,7 @@ function normalizeAgentConfigs(configs) {
 export const loadAgentConfigs = async () => {
     await init();
     try {
-        const content = await fs.readFile(AGENT_CONFIG_FILE, 'utf-8');
-        const parsed = JSON.parse(content);
+        const parsed = await readJsonFile(AGENT_CONFIG_FILE, null);
         return normalizeAgentConfigs(parsed?.agents || parsed);
     } catch {
         return {};
@@ -415,7 +447,7 @@ export const saveAgentConfigs = async (configs) => {
     const normalized = normalizeAgentConfigs(configs);
     const payload = { agents: normalized };
     try {
-        await fs.writeFile(AGENT_CONFIG_FILE, JSON.stringify(payload, null, 2));
+        await writeJsonFileAtomic(AGENT_CONFIG_FILE, payload);
     } catch (e) {
         console.error('[Persistence] Failed to save agent configs:', e);
         throw e;

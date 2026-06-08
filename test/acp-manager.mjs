@@ -1612,21 +1612,22 @@ describe('AcpManager', () => {
         ]), 13);
     });
 
-    it('drops persisted tabs whose terminal session no longer exists', async () => {
+    it('keeps persisted tabs whose terminal session is missing during restore', async () => {
         const { manager, getPersistedTabs } = createManager();
-        await manager.saveTabs([{
+        const persisted = [{
             id: 'orphaned-tab',
             agentId: 'codex',
             cwd: '/tmp/project',
             acpSessionId: 'acp-orphaned',
             terminalSessionId: 'missing-session',
             createdAt: '2026-03-23T00:00:00.000Z'
-        }]);
+        }];
+        await manager.saveTabs(persisted);
 
         await manager.restoreTabs(new Set());
 
         assert.equal(manager.tabs.size, 0);
-        assert.deepEqual(getPersistedTabs(), []);
+        assert.deepEqual(getPersistedTabs(), persisted);
     });
 
     it('preserves persisted tabs during manager disposal', async () => {
