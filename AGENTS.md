@@ -21,7 +21,9 @@ Tabminal 是一个 Node.js ESM 应用。后端入口是 `src/server.mjs`；终�
 验证 ACP UI 流程并使用内置测试 agent 时，使用
 `TABMINAL_ENABLE_TEST_AGENT=1 npm start -- --accept-terms`。
 
-用户测试服务脚本`test.sh`，功能修改完成后，后台 运行/重启 此脚本供用户测试
+用户测试服务脚本 `test.sh`，功能修改完成后，运行/重启此脚本供用户测试。若需要后台保活，使用
+`setsid /bin/bash -lc 'cd /home/coder/git/Tabminal && exec /bin/bash test.sh' > /tmp/tabminal-test-7081.log 2>&1 < /dev/null &`；否则就在当前终端显式前台运行
+`bash test.sh`。不要只用普通 `&` 或 `nohup` 启动后假设服务已保活，启动后必须确认 `7081` 可访问。
 
 杀进程只能杀7081端口的进程，禁止杀其他进程
 

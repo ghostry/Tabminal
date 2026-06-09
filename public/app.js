@@ -741,11 +741,27 @@ function slugifyMarkdownHeading(text) {
         .replace(/\s+/g, '-');
 }
 
+function createClientId(prefix = '') {
+    const cryptoRef = globalThis.crypto;
+    if (typeof cryptoRef?.randomUUID === 'function') {
+        return `${prefix}${cryptoRef.randomUUID()}`;
+    }
+    if (typeof cryptoRef?.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16);
+        cryptoRef.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+        return `${prefix}${hex.slice(0, 4).join('')}-${hex.slice(4, 6).join('')}-${hex.slice(6, 8).join('')}-${hex.slice(8, 10).join('')}-${hex.slice(10).join('')}`;
+    }
+    return `${prefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function getWorkspaceDeviceId() {
     try {
         let value = localStorage.getItem(WORKSPACE_DEVICE_ID_STORAGE_KEY) || '';
         if (!value) {
-            value = crypto.randomUUID();
+            value = createClientId();
             localStorage.setItem(WORKSPACE_DEVICE_ID_STORAGE_KEY, value);
         }
         return value;
@@ -2894,8 +2910,13 @@ class EditorManager {
         this.agentAttachmentInput.className = 'agent-panel-file-input';
         this.agentAttachmentInput.addEventListener('change', (event) => {
             const files = Array.from(event.target.files || []);
-            void this.addAgentAttachments(files);
+            const targetKey = this.agentAttachmentInput.dataset.agentTabKey || '';
+            const targetAgentTab = targetKey
+                ? state.agentTabs.get(targetKey) || null
+                : null;
+            void this.addAgentAttachments(files, targetAgentTab);
             this.agentAttachmentInput.value = '';
+            delete this.agentAttachmentInput.dataset.agentTabKey;
         });
 
         this.agentAttachmentList = document.createElement('div');
@@ -3098,6 +3119,10 @@ class EditorManager {
         );
         this.agentAttachmentButton.addEventListener('click', () => {
             if (this.agentAttachmentButton.disabled) return;
+            const agentTab = getActiveAgentTab();
+            if (agentTab?.key && this.agentAttachmentInput) {
+                this.agentAttachmentInput.dataset.agentTabKey = agentTab.key;
+            }
             this.agentAttachmentInput?.click();
         });
 
@@ -10494,9 +10519,7 @@ class EditorManager {
         )}px`;
         host.appendChild(editorNode);
 
-        const modelToken = typeof globalThis.crypto?.randomUUID === 'function'
-            ? globalThis.crypto.randomUUID()
-            : `${Date.now()}-${Math.random()}`;
+        const modelToken = createClientId();
         const uri = this.monacoInstance.Uri.from({
             scheme: 'agent-code',
             path: normalizeAgentEditorPath(section.path || '/snippet.txt'),
@@ -10722,9 +10745,7 @@ class EditorManager {
         const basePath = normalizeAgentEditorPath(
             section.path || '/snippet.txt'
         );
-        const modelToken = typeof globalThis.crypto?.randomUUID === 'function'
-            ? globalThis.crypto.randomUUID()
-            : `${Date.now()}-${Math.random()}`;
+        const modelToken = createClientId();
         const originalModel = this.monacoInstance.editor.createModel(
             section.oldText || '',
             undefined,
@@ -11495,8 +11516,8 @@ class EditorManager {
         agentTab.promptDraft = '';
     }
 
-    async addAgentAttachments(files = []) {
-        const agentTab = getActiveAgentTab();
+    async addAgentAttachments(files = [], targetAgentTab = null) {
+        const agentTab = targetAgentTab || getActiveAgentTab();
         if (!agentTab) return;
         const nextAttachments = normalizeAgentComposerAttachments(files);
         if (nextAttachments.length === 0) return;
@@ -14729,7 +14750,7 @@ class AgentTab {
             : 0.5;
         this.timelineCounter = Math.max(this.timelineCounter || 0, order);
         this.planHistory.push({
-            id: `plan-${crypto.randomUUID()}`,
+            id: createClientId('plan-'),
             createdAt: new Date().toISOString(),
             order,
             summary: buildAgentPlanSummary(normalizedEntries),
@@ -15037,14 +15058,19 @@ class AgentTab {
         if (hasAttachments) {
             const formData = new FormData();
             formData.append('text', text);
+            let attachedFileCount = 0;
             for (const attachment of attachments) {
-                if (attachment?.file instanceof File) {
+                if (attachment?.file) {
                     formData.append(
                         'attachments',
                         attachment.file,
                         attachment.name
                     );
+                    attachedFileCount += 1;
                 }
+            }
+            if (attachedFileCount === 0) {
+                throw new Error('Attachment files are no longer available. Reattach them and try again.');
             }
             request.body = formData;
         } else {
@@ -16231,7 +16257,7 @@ function normalizeAgentComposerAttachments(files) {
     return Array.from(files || [])
         .filter((file) => file instanceof File && file.name)
         .map((file) => ({
-            id: crypto.randomUUID(),
+            id: createClientId(),
             file,
             name: file.name,
             mimeType: String(file.type || '').trim(),
@@ -16249,7 +16275,7 @@ function normalizeAgentMessageAttachments(attachments) {
             const name = String(attachment?.name || '').trim();
             if (!name) return null;
             return {
-                id: String(attachment?.id || crypto.randomUUID()),
+                id: String(attachment?.id || createClientId()),
                 name,
                 mimeType: String(attachment?.mimeType || '').trim(),
                 size: Number.isFinite(attachment?.size) ? attachment.size : 0
@@ -19712,7 +19738,7 @@ function createServerClient(data, { isPrimary = false } = {}) {
     const safeId = typeof id === 'string' ? id.trim() : '';
     const finalId = safeId && !state.servers.has(safeId)
         ? safeId
-        : (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+        : createClientId();
     const server = new ServerClient({
         id: finalId,
         baseUrl: normalized,
