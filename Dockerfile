@@ -1,11 +1,11 @@
-FROM docker.m.daocloud.io/library/node:latest
-# FROM docker.1ms.run/library/node:latest
+# FROM docker.m.daocloud.io/library/node:latest
+FROM docker.1ms.run/library/node:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN sed -i 's|URIs: http://deb\.debian\.org/debian|URIs: http://mirrors.aliyun.com/debian|' /etc/apt/sources.list.d/debian.sources && \
     sed -i 's|URIs: http://deb\.debian\.org/debian-security|URIs: http://mirrors.aliyun.com/debian-security|' /etc/apt/sources.list.d/debian.sources && \
     apt update -y;\
-    apt install ripgrep sudo vim screen htop iotop iftop iputils-ping docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential rsync psmisc aria2 musl-tools -y;\
+    apt install ripgrep sudo vim screen htop iotop iftop iputils-ping docker-cli jq sshpass fonts-wqy-microhei xz-utils build-essential rsync psmisc aria2 musl-tools cron -y;\
     apt clean
 
 WORKDIR /app
